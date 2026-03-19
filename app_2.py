@@ -1,15 +1,14 @@
 # app.py
-# CCAP — Simple Time Series Baseline (QoQ + Seasonality), per bank
-# • Forecasts Purchase Sales (Bn) only
+# CCAP — Simple Time Series Baseline (QoQ + Seasonality), tables only (no graphs)
+# • Forecasts Purchase Sales (Bn) per bank
 # • Trend = average QoQ % change over a window you choose
-# • Seasonality = average quarterly (Q1..Q4) deviation from trend
+# • Seasonality = average Q1..Q4 deviation from trend (+ optional Q4 holiday lift)
 # • Projections extend to 2028 Q4 (inclusive), per bank
-# • No cards/balances used
+# • Output: numerical projections table only
 
 import re
 from typing import Dict, List
 
-import altair as alt
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -19,10 +18,7 @@ import streamlit as st
 # =========================================
 RAW_URL = "https://raw.githubusercontent.com/vincentlascano000/ccap_data/main/CCAP_DATA.csv"
 
-FRIENDLY = {
-    "purchase_sales_bn": "Purchase Sales (Bn)"
-}
-
+FRIENDLY = {"purchase_sales_bn": "Purchase Sales (Bn)"}
 BANK_ORDER_PREF = ["UB", "BDO", "BPI", "SECBANK", "MB", "RCBC"]
 
 COLUMN_SYNONYMS: Dict[str, List[str]] = {
@@ -48,6 +44,7 @@ def _canon(s: str) -> str:
     return re.sub(r"_+", "_", s).strip("_")
 
 def map_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Best-effort auto-map common header variants to canonical names."""
     csrc = {_canon(c): c for c in df.columns}
     ren = {}
     for target, syns in COLUMN_SYNONYMS.items():
@@ -59,12 +56,13 @@ def map_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df.rename(columns=ren)
 
 def parse_quarter_token(value: str):
+    """Parse '1Q23', 'Q1 2023', '2023 Q1', or a date → quarter-end Timestamp."""
     if pd.isna(value):
         return None, pd.NaT
     s = str(value).strip().upper().replace("-", " ").replace("/", " ")
     s = re.sub(r"\s+", " ", s)
 
-    m = re.match(r"^([1-4])Q(\d{2,4})$", s)  # 1Q23, 4Q2025
+    m = re.match(r"^([1-4])Q(\d{2,4})$", s)  # 1Q23 / 4Q2025
     if m:
         q, yy = int(m.group(1)), m.group(2)
         year = 2000 + int(yy) if len(yy) == 2 else int(yy)
@@ -131,15 +129,15 @@ def candidate_cols(df: pd.DataFrame, names_or_keywords: List[str]) -> List[str]:
 # =========================================
 # 2) APP UI
 # =========================================
-st.set_page_config(page_title="CCAP — Simple TS Baseline (QoQ + Seasonality)", layout="wide")
-st.title("CCAP — Simple Time Series Baseline (QoQ + Seasonality)")
+st.set_page_config(page_title="CCAP — TS Baseline (QoQ + Seasonality) — Tables", layout="wide")
+st.title("CCAP — Time Series Projections (Trend + Q4 Seasonality) — Tables Only")
 
-# Controls
 st.sidebar.header("Forecast settings")
-window_q  = st.sidebar.slider("Window for stats (quarters)", 4, 16, 8, 1)
-season_wt = st.sidebar.slider("Seasonality strength (0 = off, 1 = full)", 0.0, 1.0, 1.0, 0.1)
-table_h_q = st.sidebar.slider("Numbers table: next N projected quarters", 4, 12, 8, 1)
+window_q   = st.sidebar.slider("Window for QoQ stats (quarters)", 4, 16, 8, 1)
+season_wt  = st.sidebar.slider("Seasonality strength (0 = off, 1 = full)", 0.0, 1.0, 1.0, 0.1)
+holiday_q4 = st.sidebar.slider("Q4 holiday lift (additional % points)", 0.0, 0.10, 0.02, 0.01)
 use_median = st.sidebar.checkbox("Use median (instead of mean) for QoQ & seasonal", value=False)
+round_dec  = st.sidebar.selectbox("Round projections to (decimals)", options=[0,1,2], index=1)
 
 st.caption(f"Forecast end: **{str(TARGET_END)}**")
 
@@ -169,7 +167,7 @@ if "bank" not in df.columns:
     st.write("Detected columns:", list(df.columns))
     st.stop()
 
-# Purchase Sales column mapping (if needed)
+# Purchase Sales mapping (if needed)
 if "purchase_sales_bn" not in df.columns:
     st.sidebar.header("Column mapping")
     sugg = candidate_cols(df, COLUMN_SYNONYMS["purchase_sales_bn"]) or list(df.columns)
@@ -193,7 +191,7 @@ if not banks_pick:
     st.stop()
 
 # =========================================
-# 4) CORE TIME SERIES LOGIC (QoQ + Seasonality to TARGET_END)
+# 4) CORE TIME SERIES LOGIC (QoQ + Seasonality → TARGET_END)
 # =========================================
 def robust_stat(x: pd.Series, median=False):
     return float(x.median()) if median else float(x.mean())
@@ -201,26 +199,26 @@ def robust_stat(x: pd.Series, median=False):
 def seasonal_forecast_to_target(gbank: pd.DataFrame,
                                 window_q: int,
                                 season_strength: float,
+                                q4_extra: float,
                                 use_median: bool,
                                 target_end: pd.Period) -> pd.DataFrame:
     """
     Baseline per bank to a fixed target quarter (e.g., 2028Q4):
       1) QoQ % change r_t = (X_t/X_{t-1}) - 1
       2) Trend g = mean(r_t) over last window_q quarters
-      3) Seasonal deviation s_k for k in {Q1..Q4}: s_k = mean(r_t | quarter==k) - g
-         (computed over same window; then shrink by season_strength in [0,1])
+      3) Seasonal deviation s_k for k in {Q1..Q4}:
+            s_k = mean(r_t | quarter==k) - g   (over same window)
+         Shrink: s_k <- season_strength * s_k
+         Add holiday bump to Q4: s_4 <- s_4 + q4_extra
       4) Forecast H quarters where:
             H = max(0, (Y_target - Y_last)*4 + (Q_target - Q_last))
          For h = 1..H:
-            next_per = last_per + h
-            growth = g + s_{quarter(next_per)}
+            growth = g + s_{quarter(next)}
             X_{t+1} = X_t * (1 + growth)
     """
-    # ------------- Prepare data -------------
     gb = gbank.sort_values("quarter_dt").copy()
     if gb.empty or gb["quarter_dt"].isna().all():
-        # No dates -> no projections
-        return pd.DataFrame(columns=["quarter_dt","quarter","bank","scenario","purchase_sales_bn"])
+        return pd.DataFrame(columns=["quarter","bank","projected_purchase_sales_bn"])
 
     gb["qtr"] = gb["quarter_dt"].dt.quarter
     gb["pct"] = gb["purchase_sales_bn"].pct_change()
@@ -228,117 +226,81 @@ def seasonal_forecast_to_target(gbank: pd.DataFrame,
     last_dt  = gb["quarter_dt"].dropna().max()
     last_per = last_dt.to_period("Q")
 
-    # Normalize target_end to a proper quarterly Period
+    # Normalize target_end
     if not isinstance(target_end, pd.Period) or target_end.freqstr is None or not target_end.freqstr.startswith("Q"):
         target_end = pd.Period(str(target_end), freq="Q")
 
-    # ------------- Robust quarter distance -------------
-    # H = how many quarters to project from last_per up to target_end (inclusive of target_end step)
+    # Quarter distance H
     H = (target_end.year - last_per.year) * 4 + (target_end.quarter - last_per.quarter)
-    H = int(max(0, H))  # ensure non-negative int
-
+    H = int(max(0, H))
     if H == 0:
-        # Already at/after target_end — nothing to project
-        return pd.DataFrame(columns=["quarter_dt","quarter","bank","scenario","purchase_sales_bn"])
+        return pd.DataFrame(columns=["quarter","bank","projected_purchase_sales_bn"])
 
-    # ------------- Window subset for stats -------------
+    # Window subset
     winmask = gb["quarter_dt"] > (last_dt - pd.offsets.QuarterEnd(window_q))
     gwin = gb.loc[winmask].copy()
 
-    # Trend: mean/median QoQ %
+    # Trend g
     g_series = gwin["pct"].dropna()
-    if use_median:
-        g = float(g_series.median()) if g_series.size > 0 else 0.0
-    else:
-        g = float(g_series.mean())   if g_series.size > 0 else 0.0
+    g = robust_stat(g_series, median=use_median) if g_series.size > 0 else 0.0
 
-    # Seasonality by quarter (Q1..Q4) relative to trend
+    # Seasonality s_k
     season_map = {}
     for k in (1, 2, 3, 4):
         sk = gwin.loc[gwin["qtr"] == k, "pct"].dropna()
-        if sk.size >= 1:
-            s_k = float(sk.median() if use_median else sk.mean()) - g
-        else:
-            s_k = 0.0
-        season_map[k] = season_strength * s_k  # shrink to taste
+        s_k = (robust_stat(sk, median=use_median) - g) if sk.size >= 1 else 0.0
+        season_map[k] = season_strength * s_k
+    # Add Q4 holiday lift
+    season_map[4] = season_map.get(4, 0.0) + q4_extra
 
-    # ------------- Forecast loop to TARGET_END -------------
-    level    = float(gb.iloc[-1]["purchase_sales_bn"])
-    last_per = last_dt.to_period("Q")  # (re)ensure Period
-    rows     = []
-
+    # Forecast loop
+    level = float(gb.iloc[-1]["purchase_sales_bn"])
+    rows  = []
     for h in range(1, H + 1):
         next_per = last_per + h
-        next_dt  = next_per.to_timestamp(how="end")
         next_q   = next_per.quarter
         growth   = g + season_map.get(next_q, 0.0)
-        growth   = max(growth, -0.9)            # safety clamp
+        growth   = max(growth, -0.9)   # safety clamp
         level    = level * (1.0 + growth)
-
-        rows.append({
-            "quarter_dt": next_dt,
-            "quarter":    str(next_per),
-            "purchase_sales_bn": level
-        })
+        rows.append({"quarter": str(next_per), "projected_purchase_sales_bn": level})
 
     out = pd.DataFrame(rows)
-    out["bank"]     = gb["bank"].iloc[0]
-    out["scenario"] = "Baseline"
-    return out
-
-# ==============================
-# 5) CHART — Consolidated overlay (Actual solid, Baseline dashed)
-# (Insert this validation block right before building the charts)
-# ==============================
-
-# --- Validation & sanitation for overlay ---
-required_cols = ["quarter_dt", "value", "bank", "scenario"]
-
-# 1) Is overlay a DataFrame?
-if not isinstance(overlay, pd.DataFrame):
-    st.error(f"`overlay` is type {type(overlay)}; expected pandas.DataFrame. "
-             "This usually means concatenation returned something unexpected.")
-    st.stop()
-
-# 2) Do we have required columns?
-missing_cols = [c for c in required_cols if c not in overlay.columns]
-if missing_cols:
-    st.error(f"`overlay` is missing required columns: {missing_cols}. "
-             "Make sure the projection and actual frames rename the metric to 'value' and keep 'quarter_dt', 'bank', 'scenario'.")
-    st.write("overlay columns:", list(overlay.columns))
-    st.stop()
-
-# 3) Clean up dtypes (Altair-friendly)
-try:
-    overlay["quarter_dt"] = pd.to_datetime(overlay["quarter_dt"], errors="coerce")
-except Exception:
-    pass
-overlay = overlay.dropna(subset=["quarter_dt"]).copy()
-
-# Ensure numeric y
-overlay["value"] = pd.to_numeric(overlay["value"], errors="coerce")
-overlay = overlay.dropna(subset=["value"]).copy()
-
-# Strings for categorical fields
-overlay["bank"] = overlay["bank"].astype(str)
-overlay["scenario"] = overlay["scenario"].astype(str)
-
-# If you want to preview what we’ll plot:
-with st.expander("Debug: overlay preview & dtypes", expanded=False):
-    st.write("overlay.shape:", overlay.shape)
-    st.write("overlay.dtypes:", overlay.dtypes)
-    st.dataframe(overlay.head(12))
+    out["bank"] = gb["bank"].iloc[0]
+    return out[["quarter","bank","projected_purchase_sales_bn"]]
 
 # =========================================
-# 6) NUMBERS TABLE — rounded projected volumes
+# 5) COMPUTE PROJECTIONS (TABLES ONLY)
 # =========================================
-if not proj_table.empty:
-    tbl = proj_table.sort_values(["quarter_dt","bank","scenario"]).copy()
-    upcoming_quarters = sorted(tbl["quarter_dt"].unique())[:table_h_q]
-    tbl = (tbl[tbl["quarter_dt"].isin(upcoming_quarters)]
-           .rename(columns={"value": f"{FRIENDLY['purchase_sales_bn']} (~)"})
-           .loc[:, ["quarter","bank","scenario", f"{FRIENDLY['purchase_sales_bn']} (~)"]])
-    st.subheader("Projected volumes (rough estimates)")
-    st.dataframe(tbl, use_container_width=True)
-else:
-    st.info("No projections available to tabulate (check data/window).")
+proj_frames = []
+for b in banks_pick:
+    gbank = panel[panel["bank"] == b]
+    if gbank.shape[0] < 2:
+        continue
+    proj_b = seasonal_forecast_to_target(
+        gbank=gbank,
+        window_q=window_q,
+        season_strength=season_wt,
+        q4_extra=holiday_q4,
+        use_median=use_median,
+        target_end=TARGET_END,
+    )
+    if not proj_b.empty:
+        proj_frames.append(proj_b)
+
+if not proj_frames:
+    st.info("Not enough history or already at/after 2028 Q4 for selected banks — no projections to show.")
+    st.stop()
+
+projections = pd.concat(proj_frames, ignore_index=True)
+projections["projected_purchase_sales_bn"] = projections["projected_purchase_sales_bn"].round(int(round_dec))
+
+# Order by quarter then bank (keep preferred bank order)
+# Create a sort key for banks
+bank_order_map = {b: i for i, b in enumerate(BANK_ORDER_PREF)}
+projections["_b_sort"] = projections["bank"].map(lambda x: bank_order_map.get(x, 999))
+projections["_q_sort"] = projections["quarter"].apply(lambda q: (int(q[:4]) * 4) + int(q[-1]))  # year*4 + Q
+
+projections = projections.sort_values(["_q_sort","_b_sort","bank"]).drop(columns=["_q_sort","_b_sort"])
+
+st.subheader("Projected Purchase Sales (Bn) — Baseline (trend + seasonality) to 2028 Q4")
+st.dataframe(projections, use_container_width=True)
