@@ -607,4 +607,4 @@ if not proj_B.empty:
     st.dataframe(tidy_sort(proj_B), use_container_width=True)
 else:
     st.info("No projections to show for Method B.")
-``
+
