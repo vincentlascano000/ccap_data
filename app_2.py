@@ -570,7 +570,7 @@ metric_pick = st.selectbox(
     options=[FRIENDLY["purchase_sales_bn"], FRIENDLY["cards_in_force_bn"], FRIENDLY["sales_per_cif_000"]],
     index=0
 )
-metric_code = {v:k for k,v in FR IENDLY.items()}[metric_pick]
+metric_code = {v:k for k,v in FRIENDLY.items()}[metric_pick]
 
 col1, col2 = st.columns(2)
 with col1:
