@@ -1,7 +1,10 @@
 # app.py
-# CCAP — Time-series projections where: Purchase Sales = (CIF) × (Sales/CIF)
-# Rolling seasonal averages by quarter-of-year for growth factors (no charts).
-# Extends per bank to 2028 Q4. Outputs a single projections table.
+# CCAP — CIF × Sales/CIF projections with "latest same-quarter growth" carry-forward
+# - Purchase Sales (Bn) = scale × CIF × Sales/CIF
+# - For each quarter-of-year (Q1..Q4), future growth uses the LAST observed same-quarter % growth
+#   e.g., Q4-2026 factor = Q4-2025's factor; Q4-2027 uses the latest (which equals Q4-2026's)
+# - Extends per bank to 2028 Q4 (inclusive)
+# - Outputs NUMERICAL TABLES ONLY (no charts)
 
 import re
 from typing import Dict, List
@@ -10,7 +13,9 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-# ============== CONFIG ==============
+# =========================
+# CONFIG
+# =========================
 RAW_URL = "https://raw.githubusercontent.com/vincentlascano000/ccap_data/main/CCAP_DATA.csv"
 TARGET_END = pd.Period("2028Q4", freq="Q")  # inclusive
 BANK_ORDER_PREF = ["UB", "BDO", "BPI", "SECBANK", "MB", "RCBC"]
@@ -37,7 +42,9 @@ FRIENDLY = {
     "sales_per_cif_000": "Sales / CIF ('000)",
 }
 
-# ============== HELPERS ==============
+# =========================
+# HELPERS
+# =========================
 def _canon(s: str) -> str:
     s = str(s).strip().lower()
     s = re.sub(r"[()\[\]%]", "", s)
@@ -84,7 +91,7 @@ def parse_quarter_token(value: str):
         per = pd.Period(freq="Q", year=year, quarter=q)
         return f"{year}Q{q}", per.to_timestamp(how="end")
 
-    # Fallback: try datetime
+    # Fallback: datetime
     try:
         dt = pd.to_datetime(s, errors="raise")
         per = pd.Period(dt, freq="Q")
@@ -121,18 +128,20 @@ def candidate_cols(df: pd.DataFrame, names_or_keywords: List[str]) -> List[str]:
             uniq.append(c); seen.add(c)
     return uniq
 
-# ============== UI ==============
-st.set_page_config(page_title="CCAP — TS: CIF × Sales/CIF (Rolling Seasonal Averages)", layout="wide")
-st.title("CCAP — Projections via CIF × Sales/CIF (Rolling Seasonal Averages)")
+# =========================
+# UI
+# =========================
+st.set_page_config(page_title="CCAP — CIF × Sales/CIF (Latest Same-Quarter Growth)", layout="wide")
+st.title("CCAP — Projections via CIF × Sales/CIF (Latest same-quarter growth) — Tables Only")
 
-st.sidebar.header("Projection settings")
-base_window = st.sidebar.slider("Initial lookback (years) per quarter", 1, 4, 2, 1)  # Q1-2026 uses last 'base_window' Q1s
-use_median  = st.sidebar.checkbox("Use median instead of mean for growth", value=False)
-round_dec   = st.sidebar.selectbox("Round decimals", options=[0,1,2], index=1)
+st.caption(f"Forecast end: **{str(TARGET_END)}** — For each quarter-of-year, future growth uses the latest observed same-quarter % change.")
 
-st.caption(f"Forecast end: **{str(TARGET_END)}** — per bank, Purchase Sales = CIF × Sales/CIF (with auto scale at splice).")
+st.sidebar.header("Output settings")
+round_dec = st.sidebar.selectbox("Round decimals", options=[0,1,2], index=1)
 
-# ============== LOAD & NORMALIZE ==============
+# =========================
+# LOAD & NORMALIZE
+# =========================
 try:
     raw = load_raw_csv(RAW_URL)
 except Exception as e:
@@ -156,7 +165,7 @@ if "bank" not in df.columns:
     st.write("Detected columns:", list(df.columns))
     st.stop()
 
-# Ensure CIF & SPC columns (with manual mapping fallback)
+# Column mapping for CIF & Sales/CIF
 st.sidebar.header("Column mapping (if needed)")
 def ensure_col(name_key: str, label: str) -> str:
     if name_key in df.columns:
@@ -167,12 +176,11 @@ def ensure_col(name_key: str, label: str) -> str:
 cif_col = ensure_col("cards_in_force_bn", FRIENDLY["cards_in_force_bn"])
 spc_col = ensure_col("sales_per_cif_000", FRIENDLY["sales_per_cif_000"])
 
-# Optional: purchase sales if present (for scaling)
-has_sales = "purchase_sales_bn" in df.columns
-if not has_sales:
+# Optional: purchase sales (for scale)
+if "purchase_sales_bn" not in df.columns:
     cands = candidate_cols(df, COLUMN_SYNONYMS["purchase_sales_bn"])
     if cands:
-        sel = st.sidebar.selectbox("Select column for Purchase Sales (optional — for better scaling)", options=["<none>"] + cands, index=0)
+        sel = st.sidebar.selectbox("Select column for Purchase Sales (optional — splice scaling)", options=["<none>"] + cands, index=0)
         if sel != "<none>":
             df["purchase_sales_bn"] = df[sel]
 
@@ -195,105 +203,75 @@ if not banks_pick:
     st.info("Select at least one bank.")
     st.stop()
 
-# ============== CORE LOGIC ==============
-def robust_mean(x: pd.Series, median=False) -> float:
-    return float(x.median()) if median else float(x.mean())
-
-def rolling_seasonal_projection(bank_df: pd.DataFrame,
-                                base_window: int,
-                                target_end: pd.Period,
-                                use_median: bool) -> pd.DataFrame:
+# =========================
+# CORE: "Latest same-quarter growth" projection
+# =========================
+def last_same_quarter_factor(series: pd.Series, qtrs: pd.Series) -> Dict[int, float]:
     """
-    Project CIF and Sales/CIF individually using rolling seasonal averages of QoQ growth factors.
-    Then Purchase Sales = scale * CIF * Sales/CIF, where scale calibrates to last actual quarter.
+    Return latest observed factor (X_t / X_{t-1}) for each quarter-of-year k in {1..4}.
+    If none available for a k, fall back to series' overall last factor or 1.0.
+    """
+    f = (series / series.shift(1)).astype(float)
+    latest = {}
+    overall_last = f.dropna().iloc[-1] if f.dropna().size > 0 else 1.0
+    for k in (1,2,3,4):
+        mask = (qtrs == k) & (f.notna())
+        if mask.any():
+            # last non-nan for that same quarter-of-year
+            latest[k] = float(f[mask].iloc[-1])
+        else:
+            latest[k] = float(overall_last) if np.isfinite(overall_last) and overall_last > 0 else 1.0
+        # safety
+        if latest[k] <= 0 or not np.isfinite(latest[k]):
+            latest[k] = 1.0
+    return latest
+
+def project_bank_latest_same_qtr(bank_df: pd.DataFrame,
+                                 target_end: pd.Period) -> pd.DataFrame:
+    """
+    Project CIF and Sales/CIF by carrying forward the LATEST observed same-quarter factor.
+    For each forecast quarter:
+      X_{t+1} = X_t * factor_q  (factor_q = latest observed for that quarter-of-year q)
+      (factor remains constant across future years unless new observed data arrives)
+    Purchase Sales = scale × CIF × Sales/CIF, where scale aligns the splice (last actual).
     """
     g = bank_df.sort_values("quarter_dt").copy()
     g["qtr"] = g["quarter_dt"].dt.quarter
 
-    # Last actual period
-    last_dt  = g["quarter_dt"].dropna().max()
+    last_dt = g["quarter_dt"].dropna().max()
     last_per = last_dt.to_period("Q")
-
-    # Horizon in quarters to TARGET_END
     H = (target_end.year - last_per.year) * 4 + (target_end.quarter - last_per.quarter)
     H = int(max(0, H))
     if H == 0:
         return pd.DataFrame(columns=["quarter","bank","projected_cif_bn","projected_sales_per_cif_000","projected_purchase_sales_bn"])
 
-    # Current levels (last actual)
+    # Last levels
     cif_level = float(g.iloc[-1][cif_col])
     spc_level = float(g.iloc[-1][spc_col])
 
-    # Optional scale to match last actual purchase sales (if present)
-    if "purchase_sales_bn" in g.columns and pd.notna(g.iloc[-1]["purchase_sales_bn"]) and (cif_level is not None) and (spc_level is not None) and cif_level != 0:
-        # If SPC is in '000, units may not match; learn a scalar so identity holds at splice.
+    # Scale for Purchase Sales at splice (units reconciliation)
+    if "purchase_sales_bn" in g.columns and pd.notna(g.iloc[-1].get("purchase_sales_bn", np.nan)) and cif_level and spc_level:
         denom = cif_level * spc_level
         scale = float(g.iloc[-1]["purchase_sales_bn"]) / denom if denom not in (None, 0, np.nan) else 1.0
     else:
         scale = 1.0
 
-    # Build historical QoQ factors for each quarter-of-year for both CIF and SPC
-    # Factor f_t = X_t / X_{t-1}; we collect by quarter-of-year of time t (i.e., the realized quarter).
-    def quarter_factors(series: pd.Series, qtrs: pd.Series) -> Dict[int, List[float]]:
-        # compute f_t per row
-        f = series / series.shift(1)
-        data = {}
-        for k in (1,2,3,4):
-            vals = f[qtrs == k].dropna().tolist()
-            data[k] = vals
-        return data
-
-    hist_factors_cif = quarter_factors(g[cif_col], g["qtr"])
-    hist_factors_spc = quarter_factors(g[spc_col], g["qtr"])
-
-    # Keep forecasted factors we will generate (to implement growing rolling window)
-    fore_factors_cif = {k: [] for k in (1,2,3,4)}
-    fore_factors_spc = {k: [] for k in (1,2,3,4)}
-    # Track how many times we have forecasted each quarter
-    forecasts_done = {k: 0 for k in (1,2,3,4)}
+    # Latest observed same-quarter factors (constant into the future)
+    latest_cif_factor = last_same_quarter_factor(g[cif_col], g["qtr"])
+    latest_spc_factor = last_same_quarter_factor(g[spc_col], g["qtr"])
 
     rows = []
     for h in range(1, H + 1):
         next_per = last_per + h
-        next_q   = next_per.quarter
+        q = next_per.quarter
 
-        # Window size grows: base_window + number of prior forecasts for this quarter
-        win_k = base_window + forecasts_done[next_q]
+        f_cif = latest_cif_factor.get(q, 1.0)
+        f_spc = latest_spc_factor.get(q, 1.0)
 
-        def next_factor(hist: Dict[int, List[float]], fore: Dict[int, List[float]], q: int, fallback: float = 1.0) -> float:
-            pool = hist[q] + fore[q]
-            if len(pool) == 0:
-                return fallback
-            # use last 'win_k' elements (if fewer available, use all)
-            use = pool[-win_k:] if len(pool) >= win_k else pool
-            # convert to growth then average, or directly average factors — both are similar here
-            # we will average factors to stay in multiplicative space
-            avg_f = robust_mean(pd.Series(use), median=use_median)
-            # sanity: avoid negative or zero factors
-            if not np.isfinite(avg_f) or avg_f <= 0.0:
-                return 1.0
-            return float(avg_f)
-
-        # Fallback if no pool yet: use overall average factor from *all* quarters (recent ones if possible)
-        def overall_fallback(series: pd.Series) -> float:
-            f = (series / series.shift(1)).dropna()
-            if f.empty:
-                return 1.0
-            return float(f.median() if use_median else f.mean())
-
-        # CIF factor
-        cif_fallback = overall_fallback(g[cif_col])
-        f_cif = next_factor(hist_factors_cif, fore_factors_cif, next_q, fallback=cif_fallback)
+        # evolve levels
         cif_level *= f_cif
-        fore_factors_cif[next_q].append(f_cif)
-
-        # SPC factor
-        spc_fallback = overall_fallback(g[spc_col])
-        f_spc = next_factor(hist_factors_spc, fore_factors_spc, next_q, fallback=spc_fallback)
         spc_level *= f_spc
-        fore_factors_spc[next_q].append(f_spc)
 
-        # Purchase Sales = scale × CIF × SPC
         ps_level = scale * cif_level * spc_level
 
         rows.append({
@@ -303,20 +281,19 @@ def rolling_seasonal_projection(bank_df: pd.DataFrame,
             "projected_purchase_sales_bn": ps_level,
         })
 
-        # increment "done" counter for this quarter
-        forecasts_done[next_q] += 1
-
     out = pd.DataFrame(rows)
     out["bank"] = g["bank"].iloc[0]
     return out[["quarter","bank","projected_cif_bn","projected_sales_per_cif_000","projected_purchase_sales_bn"]]
 
-# ============== RUN PROJECTIONS ==============
+# =========================
+# RUN PROJECTIONS
+# =========================
 proj_frames = []
 for b in banks_pick:
     gbank = panel[panel["bank"] == b][["bank","quarter_dt", cif_col, spc_col] + (["purchase_sales_bn"] if "purchase_sales_bn" in panel.columns else [])]
     if gbank.shape[0] < 2:
         continue
-    proj_b = rolling_seasonal_projection(gbank, base_window=base_window, target_end=TARGET_END, use_median=use_median)
+    proj_b = project_bank_latest_same_qtr(gbank, TARGET_END)
     if not proj_b.empty:
         proj_frames.append(proj_b)
 
@@ -326,17 +303,15 @@ if not proj_frames:
 
 projections = pd.concat(proj_frames, ignore_index=True)
 
-# Round
+# Round & order
 projections["projected_cif_bn"] = projections["projected_cif_bn"].round(int(round_dec))
 projections["projected_sales_per_cif_000"] = projections["projected_sales_per_cif_000"].round(int(round_dec))
 projections["projected_purchase_sales_bn"] = projections["projected_purchase_sales_bn"].round(int(round_dec))
 
-# Order by quarter then bank
 bank_order_map = {b: i for i, b in enumerate(BANK_ORDER_PREF)}
 projections["_b_sort"] = projections["bank"].map(lambda x: bank_order_map.get(x, 999))
-# Parse quarter like "2027Q3" into sortable key
 projections["_q_sort"] = projections["quarter"].apply(lambda q: (int(q[:4]) * 4) + int(q[-1]))
 projections = projections.sort_values(["_q_sort","_b_sort","bank"]).drop(columns=["_q_sort","_b_sort"])
 
-st.subheader("Projected Numbers — CIF × Sales/CIF → Purchase Sales (to 2028 Q4)")
+st.subheader("Projected Numbers — CIF × Sales/CIF → Purchase Sales (Latest same-quarter growth) to 2028 Q4")
 st.dataframe(projections, use_container_width=True)
