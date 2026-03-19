@@ -204,102 +204,87 @@ def seasonal_forecast_to_target(gbank: pd.DataFrame,
                                 use_median: bool,
                                 target_end: pd.Period) -> pd.DataFrame:
     """
-    Baseline per bank to a fixed target quarter:
-      1) QoQ % change series r_t = (X_t/X_{t-1}) - 1
-      2) Trend growth g = mean(r_t) over last window_q quarters
-      3) Seasonal deviation by quarter k in {1..4}:
-            s_k = mean(r_t | quarter==k) - g   (over same window)
-         Then shrink: s_k <- season_strength * s_k
-      4) Let last actual quarter be P_last; forecast for H = (target_end - P_last) quarters:
-            For h in 1..H:
-                q_next = quarter of P_last + h
-                growth = g + s_{q_next}
-                X_{t+1} = X_t * (1 + growth)
+    Baseline per bank to a fixed target quarter (e.g., 2028Q4):
+      1) QoQ % change r_t = (X_t/X_{t-1}) - 1
+      2) Trend g = mean(r_t) over last window_q quarters
+      3) Seasonal deviation s_k for k in {Q1..Q4}: s_k = mean(r_t | quarter==k) - g
+         (computed over same window; then shrink by season_strength in [0,1])
+      4) Forecast H quarters where:
+            H = max(0, (Y_target - Y_last)*4 + (Q_target - Q_last))
+         For h = 1..H:
+            next_per = last_per + h
+            growth = g + s_{quarter(next_per)}
+            X_{t+1} = X_t * (1 + growth)
     """
+    # ------------- Prepare data -------------
     gb = gbank.sort_values("quarter_dt").copy()
+    if gb.empty or gb["quarter_dt"].isna().all():
+        # No dates -> no projections
+        return pd.DataFrame(columns=["quarter_dt","quarter","bank","scenario","purchase_sales_bn"])
+
     gb["qtr"] = gb["quarter_dt"].dt.quarter
     gb["pct"] = gb["purchase_sales_bn"].pct_change()
 
-    # Window subset
-    last_dt = gb["quarter_dt"].max()
+    last_dt  = gb["quarter_dt"].dropna().max()
     last_per = last_dt.to_period("Q")
-    H = int((target_end - last_per))  # number of quarters to project (0 or more)
-    if H <= 0:
-        # Nothing to project; return empty projections
+
+    # Normalize target_end to a proper quarterly Period
+    if not isinstance(target_end, pd.Period) or target_end.freqstr is None or not target_end.freqstr.startswith("Q"):
+        target_end = pd.Period(str(target_end), freq="Q")
+
+    # ------------- Robust quarter distance -------------
+    # H = how many quarters to project from last_per up to target_end (inclusive of target_end step)
+    H = (target_end.year - last_per.year) * 4 + (target_end.quarter - last_per.quarter)
+    H = int(max(0, H))  # ensure non-negative int
+
+    if H == 0:
+        # Already at/after target_end — nothing to project
         return pd.DataFrame(columns=["quarter_dt","quarter","bank","scenario","purchase_sales_bn"])
 
+    # ------------- Window subset for stats -------------
     winmask = gb["quarter_dt"] > (last_dt - pd.offsets.QuarterEnd(window_q))
-    gwin = gb[winmask].copy()
+    gwin = gb.loc[winmask].copy()
 
-    # Trend (mean/median QoQ %)
+    # Trend: mean/median QoQ %
     g_series = gwin["pct"].dropna()
-    g = robust_stat(g_series, median=use_median) if g_series.size > 0 else 0.0
+    if use_median:
+        g = float(g_series.median()) if g_series.size > 0 else 0.0
+    else:
+        g = float(g_series.mean())   if g_series.size > 0 else 0.0
 
-    # Seasonality (by observed quarter)
+    # Seasonality by quarter (Q1..Q4) relative to trend
     season_map = {}
-    for k in [1, 2, 3, 4]:
+    for k in (1, 2, 3, 4):
         sk = gwin.loc[gwin["qtr"] == k, "pct"].dropna()
         if sk.size >= 1:
-            season_map[k] = robust_stat(sk, median=use_median) - g
+            s_k = float(sk.median() if use_median else sk.mean()) - g
         else:
-            season_map[k] = 0.0
-    for k in season_map:
-        season_map[k] = season_strength * season_map[k]
+            s_k = 0.0
+        season_map[k] = season_strength * s_k  # shrink to taste
 
-    # Forecast loop to TARGET_END
-    level = float(gb.iloc[-1]["purchase_sales_bn"])
-    levels = []
+    # ------------- Forecast loop to TARGET_END -------------
+    level    = float(gb.iloc[-1]["purchase_sales_bn"])
+    last_per = last_dt.to_period("Q")  # (re)ensure Period
+    rows     = []
+
     for h in range(1, H + 1):
         next_per = last_per + h
         next_dt  = next_per.to_timestamp(how="end")
         next_q   = next_per.quarter
         growth   = g + season_map.get(next_q, 0.0)
-        growth   = max(growth, -0.9)  # avoid negative collapse
+        growth   = max(growth, -0.9)            # safety clamp
         level    = level * (1.0 + growth)
-        levels.append({"quarter_dt": next_dt, "quarter": str(next_per), "purchase_sales_bn": level})
 
-    out = pd.DataFrame(levels)
-    out["bank"] = gb["bank"].iloc[0]
+        rows.append({
+            "quarter_dt": next_dt,
+            "quarter":    str(next_per),
+            "purchase_sales_bn": level
+        })
+
+    out = pd.DataFrame(rows)
+    out["bank"]     = gb["bank"].iloc[0]
     out["scenario"] = "Baseline"
     return out
-
-# Build actual + projections for selected banks
-plot_frames = []
-table_frames = []
-for b in banks_pick:
-    gbank = panel[panel["bank"] == b]
-    if gbank.shape[0] < 2:
-        continue
-    proj_b = seasonal_forecast_to_target(
-        gbank=gbank,
-        window_q=window_q,
-        season_strength=season_wt,
-        use_median=use_median,
-        target_end=TARGET_END,
-    )
-    # Actual
-    hist_b = gbank.assign(scenario="Actual")
-    hist_b = hist_b.rename(columns={"purchase_sales_bn":"value"})
-    hist_b = hist_b[["bank","quarter_dt","value","scenario"]]
-    # Projections
-    if not proj_b.empty:
-        proj_plot = proj_b.rename(columns={"purchase_sales_bn":"value"})[["bank","quarter_dt","value","scenario"]]
-        plot_frames += [hist_b, proj_plot]
-        table_frames.append(
-            proj_b.assign(value=np.round(proj_b["purchase_sales_bn"], 1))[["quarter_dt","quarter","bank","scenario","value"]]
-        )
-    else:
-        plot_frames += [hist_b]
-
-if not plot_frames:
-    st.info("Not enough history to build projections. Try selecting other banks or reducing the window.")
-    st.stop()
-
-overlay = pd.concat(plot_frames, ignore_index=True)
-proj_table = pd.concat(table_frames, ignore_index=True) if table_frames else pd.DataFrame(
-    columns=["quarter_dt","quarter","bank","scenario","value"]
-)
-
 # =========================================
 # 5) CHART — Consolidated overlay (Actual solid, Baseline dashed)
 # =========================================
