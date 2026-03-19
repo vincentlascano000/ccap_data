@@ -3,6 +3,7 @@
 # Method A: Rolling seasonal averages (YoY, expanding by quarter-of-year)
 # Method B: Latest same-quarter YoY carry-forward
 # Purchase Sales = scale × CIF × Sales/CIF (scale fitted at splice)
+# NEW: Adds QoQ % change columns (2 decimals) for Purchase Sales, CIF, and Sales/CIF in projection tables.
 
 import re
 from typing import Dict, List
@@ -142,9 +143,6 @@ st.sidebar.header("Rolling seasonal (Method A)")
 base_window_years = st.sidebar.slider("Initial lookback (years) per quarter", 1, 4, 2, 1)
 use_median_A = st.sidebar.checkbox("Use median (instead of mean) for A", value=False)
 
-st.sidebar.header("Latest YoY (Method B)")
-# No parameters needed; uses latest same-quarter YoY carry-forward
-
 # =========================
 # LOAD & NORMALIZE
 # =========================
@@ -252,9 +250,12 @@ def project_bank_latest_same_qtr_yoy(bank_df: pd.DataFrame,
     H = int(max(0, H))
     if H == 0:
         return pd.DataFrame(columns=[
-            "quarter","bank","method","projected_cif_bn","projected_sales_per_cif_000","projected_purchase_sales_bn"
+            "quarter","bank","method",
+            "projected_cif_bn","projected_sales_per_cif_000","projected_purchase_sales_bn",
+            "delta_cif_pct","delta_sales_per_cif_pct","delta_purchase_sales_pct"
         ])
 
+    # Splice levels
     cif_last = float(g.iloc[-1][cif_col])
     spc_last = float(g.iloc[-1][spc_col])
     if "purchase_sales_bn" in g.columns and pd.notna(g.iloc[-1].get("purchase_sales_bn", np.nan)) and cif_last and spc_last:
@@ -280,21 +281,33 @@ def project_bank_latest_same_qtr_yoy(bank_df: pd.DataFrame,
         t = last_per + h
         q = t.quarter
 
+        # Previous quarter levels for delta (%)
+        prev_per = t - 1
+        prev_cif = levels_cif.get(prev_per, cif_last)
+        prev_spc = levels_spc.get(prev_per, spc_last)
+        prev_ps  = scale * prev_cif * prev_spc
+
+        # CIF
         if (t - 4) in levels_cif:
             cif_t = levels_cif[t - 4] * yoy_cif[q]
         else:
-            prev = t - 1
-            cif_t = (levels_cif[prev] * f_qoq_cif) if prev in levels_cif else (cif_last * f_qoq_cif)
+            cif_t = prev_cif * f_qoq_cif
         levels_cif[t] = cif_t
 
+        # SPC
         if (t - 4) in levels_spc:
             spc_t = levels_spc[t - 4] * yoy_spc[q]
         else:
-            prev = t - 1
-            spc_t = (levels_spc[prev] * f_qoq_spc) if prev in levels_spc else (spc_last * f_qoq_spc)
+            spc_t = prev_spc * f_qoq_spc
         levels_spc[t] = spc_t
 
+        # Purchase Sales
         ps_t = scale * cif_t * spc_t
+
+        # --- NEW: deltas (QoQ %) rounded to 2 decimals
+        d_cif = ((cif_t / prev_cif) - 1.0) * 100 if prev_cif not in (0, np.nan) else np.nan
+        d_spc = ((spc_t / prev_spc) - 1.0) * 100 if prev_spc not in (0, np.nan) else np.nan
+        d_ps  = ((ps_t  / prev_ps)  - 1.0) * 100 if prev_ps  not in (0, np.nan) else np.nan
 
         rows.append({
             "quarter": str(t),
@@ -302,7 +315,10 @@ def project_bank_latest_same_qtr_yoy(bank_df: pd.DataFrame,
             "method": "Latest YoY",
             "projected_cif_bn": cif_t,
             "projected_sales_per_cif_000": spc_t,
-            "projected_purchase_sales_bn": ps_t
+            "projected_purchase_sales_bn": ps_t,
+            "delta_cif_pct": None if pd.isna(d_cif) else round(float(d_cif), 2),
+            "delta_sales_per_cif_pct": None if pd.isna(d_spc) else round(float(d_spc), 2),
+            "delta_purchase_sales_pct": None if pd.isna(d_ps)  else round(float(d_ps),  2),
         })
     return pd.DataFrame(rows)
 
@@ -325,7 +341,7 @@ def rolling_seasonal_projection_yoy(bank_df: pd.DataFrame,
       1) Gather historical YoY factors: f_{Y,q} = X_{Y,q} / X_{Y-1,q}
       2) For forecast year Y*, use average of last K YoY factors for that quarter,
          where K starts at base_window and increases by 1 each time that quarter recurs in forecasts
-      3) X_{Y*,q} = X_{Y*-1,q} * avg_factor_q
+      3) X_{Y*,q} = X_{Y-1,q} * avg_factor_q
     Applies separately to CIF and Sales/CIF; PS = scale × CIF × SPC.
     """
     g = bank_df.sort_values("quarter_dt").copy()
@@ -338,7 +354,9 @@ def rolling_seasonal_projection_yoy(bank_df: pd.DataFrame,
     H = int(max(0, H))
     if H == 0:
         return pd.DataFrame(columns=[
-            "quarter","bank","method","projected_cif_bn","projected_sales_per_cif_000","projected_purchase_sales_bn"
+            "quarter","bank","method",
+            "projected_cif_bn","projected_sales_per_cif_000","projected_purchase_sales_bn",
+            "delta_cif_pct","delta_sales_per_cif_pct","delta_purchase_sales_pct"
         ])
 
     # Splice scaling
@@ -386,9 +404,15 @@ def rolling_seasonal_projection_yoy(bank_df: pd.DataFrame,
         t = last_per + h
         q = t.quarter
 
+        # Previous quarter levels (for delta %)
+        prev_per = t - 1
+        prev_cif = levels_cif.get(prev_per, cif_last)
+        prev_spc = levels_spc.get(prev_per, spc_last)
+        prev_ps  = scale * prev_cif * prev_spc
+
         # Determine window size for this quarter
         K = base_window + times_forecasted[q]
-        # Build pools: historical + already-forecasted YoY factors for this quarter
+        # Pools: historical + already-forecasted YoY factors
         pool_cif = hist_yoy_cif[q] + fore_yoy_cif[q]
         pool_spc = hist_yoy_spc[q] + fore_yoy_spc[q]
 
@@ -405,20 +429,23 @@ def rolling_seasonal_projection_yoy(bank_df: pd.DataFrame,
             cif_t = levels_cif[t - 4] * f_cif
             fore_yoy_cif[q].append(f_cif)
         else:
-            prev = t - 1
-            cif_t = (levels_cif[prev] * f_qoq_cif) if prev in levels_cif else (cif_last * f_qoq_cif)
+            cif_t = prev_cif * f_qoq_cif
 
         if (t - 4) in levels_spc:
             f_spc = avg_factor(pool_spc, f_qoq_spc)
             spc_t = levels_spc[t - 4] * f_spc
             fore_yoy_spc[q].append(f_spc)
         else:
-            prev = t - 1
-            spc_t = (levels_spc[prev] * f_qoq_spc) if prev in levels_spc else (spc_last * f_qoq_spc)
+            spc_t = prev_spc * f_qoq_spc
 
         levels_cif[t] = cif_t
         levels_spc[t] = spc_t
         ps_t = scale * cif_t * spc_t
+
+        # --- NEW: deltas (QoQ %) rounded to 2 decimals
+        d_cif = ((cif_t / prev_cif) - 1.0) * 100 if prev_cif not in (0, np.nan) else np.nan
+        d_spc = ((spc_t / prev_spc) - 1.0) * 100 if prev_spc not in (0, np.nan) else np.nan
+        d_ps  = ((ps_t  / prev_ps)  - 1.0) * 100 if prev_ps  not in (0, np.nan) else np.nan
 
         rows.append({
             "quarter": str(t),
@@ -426,7 +453,10 @@ def rolling_seasonal_projection_yoy(bank_df: pd.DataFrame,
             "method": "Rolling Seasonal (YoY avg)",
             "projected_cif_bn": cif_t,
             "projected_sales_per_cif_000": spc_t,
-            "projected_purchase_sales_bn": ps_t
+            "projected_purchase_sales_bn": ps_t,
+            "delta_cif_pct": None if pd.isna(d_cif) else round(float(d_cif), 2),
+            "delta_sales_per_cif_pct": None if pd.isna(d_spc) else round(float(d_spc), 2),
+            "delta_purchase_sales_pct": None if pd.isna(d_ps)  else round(float(d_ps),  2),
         })
 
         times_forecasted[q] += 1
@@ -458,7 +488,7 @@ if not (proj_A_frames or proj_B_frames):
 proj_A = pd.concat(proj_A_frames, ignore_index=True) if proj_A_frames else pd.DataFrame()
 proj_B = pd.concat(proj_B_frames, ignore_index=True) if proj_B_frames else pd.DataFrame()
 
-# Round
+# Round levels per UI (delta columns are already rounded 2 decimals above)
 for dfp in [proj_A, proj_B]:
     if not dfp.empty:
         dfp["projected_cif_bn"] = dfp["projected_cif_bn"].round(int(round_dec))
@@ -480,7 +510,6 @@ def chart_method(method_name: str, metric_code: str):
     actual = hist_all[["bank","quarter_dt",metric_code]].dropna().copy()
     actual = actual.rename(columns={metric_code:"value"})
     actual["scenario"] = "Actual"
-
     overlays.append(actual[["bank","quarter_dt","value","scenario"]])
 
     # Projections
@@ -551,24 +580,31 @@ with col2:
         st.altair_chart(chB, use_container_width=True)
 
 # =========================
-# TABLES
+# TABLES (with delta columns)
 # =========================
+def tidy_sort(dfp: pd.DataFrame) -> pd.DataFrame:
+    if dfp.empty: return dfp
+    bank_order_map = {b: i for i, b in enumerate(BANK_ORDER_PREF)}
+    dfp["_b_sort"] = dfp["bank"].map(lambda x: bank_order_map.get(x, 999))
+    dfp["_q_sort"] = dfp["quarter"].apply(lambda q: (int(q[:4]) * 4) + int(q[-1]))
+    dfp = dfp.sort_values(["_q_sort","_b_sort","bank"]).drop(columns=["_q_sort","_b_sort"])
+    # Column order: quarter, bank, method, levels, deltas
+    cols = ["quarter","bank","method",
+            "projected_purchase_sales_bn","projected_cif_bn","projected_sales_per_cif_000",
+            "delta_purchase_sales_pct","delta_cif_pct","delta_sales_per_cif_pct"]
+    # keep only those that exist
+    cols = [c for c in cols if c in dfp.columns]
+    return dfp[cols]
+
 st.subheader("Projections Table — Method A (Rolling Seasonal YoY avg)")
 if not proj_A.empty:
-    bank_order_map = {b: i for i, b in enumerate(BANK_ORDER_PREF)}
-    proj_A["_b_sort"] = proj_A["bank"].map(lambda x: bank_order_map.get(x, 999))
-    proj_A["_q_sort"] = proj_A["quarter"].apply(lambda q: (int(q[:4]) * 4) + int(q[-1]))
-    show_A = proj_A.sort_values(["_q_sort","_b_sort","bank"]).drop(columns=["_q_sort","_b_sort"])
-    st.dataframe(show_A, use_container_width=True)
+    st.dataframe(tidy_sort(proj_A), use_container_width=True)
 else:
     st.info("No projections to show for Method A.")
 
 st.subheader("Projections Table — Method B (Latest same‑quarter YoY)")
 if not proj_B.empty:
-    bank_order_map = {b: i for i, b in enumerate(BANK_ORDER_PREF)}
-    proj_B["_b_sort"] = proj_B["bank"].map(lambda x: bank_order_map.get(x, 999))
-    proj_B["_q_sort"] = proj_B["quarter"].apply(lambda q: (int(q[:4]) * 4) + int(q[-1]))
-    show_B = proj_B.sort_values(["_q_sort","_b_sort","bank"]).drop(columns=["_q_sort","_b_sort"])
-    st.dataframe(show_B, use_container_width=True)
+    st.dataframe(tidy_sort(proj_B), use_container_width=True)
 else:
     st.info("No projections to show for Method B.")
+``
