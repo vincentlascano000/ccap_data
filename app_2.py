@@ -285,50 +285,49 @@ def seasonal_forecast_to_target(gbank: pd.DataFrame,
     out["bank"]     = gb["bank"].iloc[0]
     out["scenario"] = "Baseline"
     return out
-# =========================================
+
+# ==============================
 # 5) CHART — Consolidated overlay (Actual solid, Baseline dashed)
-# =========================================
-color_scale = alt.Scale(scheme='tableau10')
+# (Insert this validation block right before building the charts)
+# ==============================
 
-line_actual = (
-    alt.Chart(overlay)
-      .transform_filter(alt.datum.scenario == "Actual")
-      .mark_line(point=True, strokeWidth=2)
-      .encode(
-          x=alt.X("quarter_dt:T", title="Quarter", axis=alt.Axis(format="%Y Q%q")),
-          y=alt.Y("value:Q", title=FRIENDLY["purchase_sales_bn"]),
-          color=alt.Color("bank:N", title="Bank",
-                          sort=banks_pick, scale=color_scale),
-          tooltip=[
-              alt.Tooltip("bank:N", title="Bank"),
-              alt.Tooltip("quarter_dt:T", title="Quarter", format="%Y Q%q"),
-              alt.Tooltip("value:Q", title=FRIENDLY["purchase_sales_bn"], format=",.2f"),
-          ]
-      )
-      .properties(height=380)
-)
+# --- Validation & sanitation for overlay ---
+required_cols = ["quarter_dt", "value", "bank", "scenario"]
 
-line_proj = (
-    alt.Chart(overlay)
-      .transform_filter(alt.datum.scenario != "Actual")
-      .mark_line(point=False, strokeWidth=2, strokeDash=[6,4])
-      .encode(
-          x="quarter_dt:T",
-          y="value:Q",
-          color=alt.Color("bank:N", title="Bank",
-                          sort=banks_pick, scale=color_scale),
-          tooltip=[
-              alt.Tooltip("bank:N", title="Bank"),
-              alt.Tooltip("quarter_dt:T", title="Quarter", format="%Y Q%q"),
-              alt.Tooltip("value:Q", title=FRIENDLY["purchase_sales_bn"], format=",.2f"),
-              alt.Tooltip("scenario:N", title="Scenario")
-          ]
-      )
-      .properties(height=380)
-)
+# 1) Is overlay a DataFrame?
+if not isinstance(overlay, pd.DataFrame):
+    st.error(f"`overlay` is type {type(overlay)}; expected pandas.DataFrame. "
+             "This usually means concatenation returned something unexpected.")
+    st.stop()
 
-st.subheader("Purchase Sales (Bn) — Actual vs Baseline (trend + seasonality) — Forecast to 2028 Q4")
-st.altair_chart(alt.layer(line_actual, line_proj), use_container_width=True)
+# 2) Do we have required columns?
+missing_cols = [c for c in required_cols if c not in overlay.columns]
+if missing_cols:
+    st.error(f"`overlay` is missing required columns: {missing_cols}. "
+             "Make sure the projection and actual frames rename the metric to 'value' and keep 'quarter_dt', 'bank', 'scenario'.")
+    st.write("overlay columns:", list(overlay.columns))
+    st.stop()
+
+# 3) Clean up dtypes (Altair-friendly)
+try:
+    overlay["quarter_dt"] = pd.to_datetime(overlay["quarter_dt"], errors="coerce")
+except Exception:
+    pass
+overlay = overlay.dropna(subset=["quarter_dt"]).copy()
+
+# Ensure numeric y
+overlay["value"] = pd.to_numeric(overlay["value"], errors="coerce")
+overlay = overlay.dropna(subset=["value"]).copy()
+
+# Strings for categorical fields
+overlay["bank"] = overlay["bank"].astype(str)
+overlay["scenario"] = overlay["scenario"].astype(str)
+
+# If you want to preview what we’ll plot:
+with st.expander("Debug: overlay preview & dtypes", expanded=False):
+    st.write("overlay.shape:", overlay.shape)
+    st.write("overlay.dtypes:", overlay.dtypes)
+    st.dataframe(overlay.head(12))
 
 # =========================================
 # 6) NUMBERS TABLE — rounded projected volumes
