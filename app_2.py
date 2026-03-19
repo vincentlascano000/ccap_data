@@ -1,9 +1,9 @@
 # app.py
 # CCAP — Two projection methods + two charts + tables (to 2028 Q4)
-# Method A: Rolling seasonal averages (YoY, expanding by quarter-of-year)
+# Method A: Rolling seasonal YoY averages (expanding by quarter-of-year)
 # Method B: Latest same-quarter YoY carry-forward
 # Purchase Sales = scale × CIF × Sales/CIF (scale fitted at splice)
-# NEW: Adds QoQ % change columns (2 decimals) for Purchase Sales, CIF, and Sales/CIF in projection tables.
+# Tables include QoQ % change (two decimal % strings) for Purchase Sales, CIF, Sales/CIF.
 
 import re
 from typing import Dict, List
@@ -128,16 +128,23 @@ def candidate_cols(df: pd.DataFrame, names_or_keywords: List[str]) -> List[str]:
             uniq.append(c); seen.add(c)
     return uniq
 
+def format_percent_cols(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
+    """Render numeric percent columns as strings with '%' and 2 decimals."""
+    out = df.copy()
+    for c in cols:
+        if c in out.columns:
+            out[c] = out[c].apply(lambda x: (f"{x:.2f}%" if pd.notna(x) else None))
+    return out
+
 # =========================
 # UI
 # =========================
 st.set_page_config(page_title="CCAP — Two TS Methods + Charts", layout="wide")
 st.title("CCAP — CIF × Sales/CIF → Purchase Sales: Rolling Seasonal vs Latest YoY")
-
 st.caption(f"Forecast end: **{str(TARGET_END)}**")
 
 st.sidebar.header("Data & Output")
-round_dec = st.sidebar.selectbox("Round decimals", options=[0,1,2], index=1)
+round_dec = st.sidebar.selectbox("Round decimals (levels)", options=[0,1,2], index=1)
 
 st.sidebar.header("Rolling seasonal (Method A)")
 base_window_years = st.sidebar.slider("Initial lookback (years) per quarter", 1, 4, 2, 1)
@@ -281,7 +288,7 @@ def project_bank_latest_same_qtr_yoy(bank_df: pd.DataFrame,
         t = last_per + h
         q = t.quarter
 
-        # Previous quarter levels for delta (%)
+        # Previous quarter levels for QoQ % deltas
         prev_per = t - 1
         prev_cif = levels_cif.get(prev_per, cif_last)
         prev_spc = levels_spc.get(prev_per, spc_last)
@@ -304,7 +311,7 @@ def project_bank_latest_same_qtr_yoy(bank_df: pd.DataFrame,
         # Purchase Sales
         ps_t = scale * cif_t * spc_t
 
-        # --- NEW: deltas (QoQ %) rounded to 2 decimals
+        # QoQ % deltas (two decimals)
         d_cif = ((cif_t / prev_cif) - 1.0) * 100 if prev_cif not in (0, np.nan) else np.nan
         d_spc = ((spc_t / prev_spc) - 1.0) * 100 if prev_spc not in (0, np.nan) else np.nan
         d_ps  = ((ps_t  / prev_ps)  - 1.0) * 100 if prev_ps  not in (0, np.nan) else np.nan
@@ -404,7 +411,7 @@ def rolling_seasonal_projection_yoy(bank_df: pd.DataFrame,
         t = last_per + h
         q = t.quarter
 
-        # Previous quarter levels (for delta %)
+        # Previous quarter levels (for QoQ % deltas)
         prev_per = t - 1
         prev_cif = levels_cif.get(prev_per, cif_last)
         prev_spc = levels_spc.get(prev_per, spc_last)
@@ -442,7 +449,7 @@ def rolling_seasonal_projection_yoy(bank_df: pd.DataFrame,
         levels_spc[t] = spc_t
         ps_t = scale * cif_t * spc_t
 
-        # --- NEW: deltas (QoQ %) rounded to 2 decimals
+        # QoQ % deltas (two decimals)
         d_cif = ((cif_t / prev_cif) - 1.0) * 100 if prev_cif not in (0, np.nan) else np.nan
         d_spc = ((spc_t / prev_spc) - 1.0) * 100 if prev_spc not in (0, np.nan) else np.nan
         d_ps  = ((ps_t  / prev_ps)  - 1.0) * 100 if prev_ps  not in (0, np.nan) else np.nan
@@ -488,7 +495,7 @@ if not (proj_A_frames or proj_B_frames):
 proj_A = pd.concat(proj_A_frames, ignore_index=True) if proj_A_frames else pd.DataFrame()
 proj_B = pd.concat(proj_B_frames, ignore_index=True) if proj_B_frames else pd.DataFrame()
 
-# Round levels per UI (delta columns are already rounded 2 decimals above)
+# Round level columns per UI; keep delta numeric (formatted later)
 for dfp in [proj_A, proj_B]:
     if not dfp.empty:
         dfp["projected_cif_bn"] = dfp["projected_cif_bn"].round(int(round_dec))
@@ -558,9 +565,12 @@ def chart_method(method_name: str, metric_code: str):
     return alt.layer(actual_line, proj_line)
 
 # Metric choice for charts
-metric_pick = st.selectbox("Metric to chart", options=[FRIENDLY["purchase_sales_bn"], FRIENDLY["cards_in_force_bn"], FRIENDLY["sales_per_cif_000"]],
-                           index=0)
-metric_code = {v:k for k,v in FRIENDLY.items()}[metric_pick]
+metric_pick = st.selectbox(
+    "Metric to chart",
+    options=[FRIENDLY["purchase_sales_bn"], FRIENDLY["cards_in_force_bn"], FRIENDLY["sales_per_cif_000"]],
+    index=0
+)
+metric_code = {v:k for k,v in FR IENDLY.items()}[metric_pick]
 
 col1, col2 = st.columns(2)
 with col1:
@@ -580,7 +590,7 @@ with col2:
         st.altair_chart(chB, use_container_width=True)
 
 # =========================
-# TABLES (with delta columns)
+# TABLES (with % delta columns rendered as percent strings)
 # =========================
 def tidy_sort(dfp: pd.DataFrame) -> pd.DataFrame:
     if dfp.empty: return dfp
@@ -592,19 +602,21 @@ def tidy_sort(dfp: pd.DataFrame) -> pd.DataFrame:
     cols = ["quarter","bank","method",
             "projected_purchase_sales_bn","projected_cif_bn","projected_sales_per_cif_000",
             "delta_purchase_sales_pct","delta_cif_pct","delta_sales_per_cif_pct"]
-    # keep only those that exist
     cols = [c for c in cols if c in dfp.columns]
     return dfp[cols]
 
 st.subheader("Projections Table — Method A (Rolling Seasonal YoY avg)")
 if not proj_A.empty:
-    st.dataframe(tidy_sort(proj_A), use_container_width=True)
+    show_A = tidy_sort(proj_A)
+    show_A = format_percent_cols(show_A, ["delta_purchase_sales_pct", "delta_cif_pct", "delta_sales_per_cif_pct"])
+    st.dataframe(show_A, use_container_width=True)
 else:
     st.info("No projections to show for Method A.")
 
 st.subheader("Projections Table — Method B (Latest same‑quarter YoY)")
 if not proj_B.empty:
-    st.dataframe(tidy_sort(proj_B), use_container_width=True)
+    show_B = tidy_sort(proj_B)
+    show_B = format_percent_cols(show_B, ["delta_purchase_sales_pct", "delta_cif_pct", "delta_sales_per_cif_pct"])
+    st.dataframe(show_B, use_container_width=True)
 else:
     st.info("No projections to show for Method B.")
-
