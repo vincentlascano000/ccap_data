@@ -319,7 +319,6 @@ with st.expander("Diagnostics status (data availability)", expanded=False):
         st.info("RAW view has no rows. Check that selected banks have enough quarters for QoQ % changes.")
     if len(resid_df) == 0:
         st.info("RESIDUAL view has no rows. Often this happens when the first same‑quarter has no baseline yet; try including more banks.")
-``
 
 # =========================
 # PROJECTIONS: Methods A/B/C
