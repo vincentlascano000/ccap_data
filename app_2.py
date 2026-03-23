@@ -248,39 +248,78 @@ def fit_uplift_coefs(panel_bank: pd.DataFrame) -> Tuple[float,float,float,pd.Dat
 b_cif, b_spc, b_int, fit_df = fit_uplift_coefs(panel[panel["bank"].isin(banks_pick)])
 
 # --- Coefficient Diagnostics helper frames (raw and residual views) ---
-def make_coef_diag_frames(fit_df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+# --- Coefficient Diagnostics helper: build from selected panel (robust) ---
+def make_coef_diag_frames_from_panel(panel_sel: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
+    Build diagnostic frames for coefficient visuals directly from the selected banks' panel.
     Returns:
-      raw_df  : bank, quarter_dt, d_ps_pct, d_cif_pct, d_spc_pct
-      resid_df: bank, quarter_dt, r_ps_pct, d_cif_pct, d_spc_pct
+      raw_df   : bank, quarter_dt, d_ps_pct, d_cif_pct, d_spc_pct
+      resid_df : bank, quarter_dt, r_ps_pct, d_cif_pct, d_spc_pct
+                 (residual r_ps = d_ps - g_base where g_base is expanding same-quarter average)
+    This mirrors how coefficients are estimated, but isn't limited by the regression's final sample.
     """
-    if fit_df is None or fit_df.empty:
+    if panel_sel is None or panel_sel.empty:
         return pd.DataFrame(), pd.DataFrame()
 
-    tmp = fit_df.copy()
-    tmp["quarter_dt"] = tmp["per"].dt.to_timestamp() if "per" in tmp.columns else pd.NaT
+    g = panel_sel.sort_values(["bank", "quarter_dt"]).copy()
+    g["per"] = g["quarter_dt"].dt.to_period("Q")
+    g["qtr"] = g["per"].apply(lambda p: p.quarter)
 
-    # Raw growths (% for display)
-    raw_df = tmp[["bank","quarter_dt","d_ps","d_cif","d_spc"]].dropna().copy()
-    for c in ["d_ps","d_cif","d_spc"]:
-        raw_df[c] = pd.to_numeric(raw_df[c], errors="coerce")
-    raw_df = raw_df.dropna()
-    raw_df["d_ps_pct"]  = raw_df["d_ps"]*100.0
-    raw_df["d_cif_pct"] = raw_df["d_cif"]*100.0
-    raw_df["d_spc_pct"] = raw_df["d_spc"]*100.0
+    # QoQ % changes (proportions)
+    g["d_ps"]  = g.groupby("bank")["purchase_sales_bn"].pct_change()
+    g["d_cif"] = g.groupby("bank")["cards_in_force_bn"].pct_change()
+    g["d_spc"] = g.groupby("bank")["sales_per_cif_000"].pct_change()
 
-    # Residual growth vs drivers
-    resid_df = tmp[["bank","quarter_dt","r_ps","d_cif","d_spc"]].dropna().copy()
-    for c in ["r_ps","d_cif","d_spc"]:
-        resid_df[c] = pd.to_numeric(resid_df[c], errors="coerce")
-    resid_df = resid_df.dropna()
-    resid_df["r_ps_pct"]  = resid_df["r_ps"]*100.0
-    resid_df["d_cif_pct"] = resid_df["d_cif"]*100.0
-    resid_df["d_spc_pct"] = resid_df["d_spc"]*100.0
+    # Expanding same‑quarter baseline for PS growth (proportions)
+    base_g = []
+    for b, gb in g.groupby("bank"):
+        pools = {1: [], 2: [], 3: [], 4: []}
+        q_b   = gb["qtr"].to_numpy()
+        dps   = gb["d_ps"].to_numpy()
+        series = []
+        for i in range(len(gb)):
+            q = q_b[i]
+            pool = pools[q]
+            g_base = float(np.mean(pool)) if len(pool) > 0 else np.nan
+            series.append(g_base)
+            if pd.notna(dps[i]):
+                pools[q].append(dps[i])
+        base_g.append(pd.Series(series, index=gb.index))
+    g["g_base"] = pd.concat(base_g).sort_index()
+
+    # Residual growth
+    g["r_ps"] = g["d_ps"] - g["g_base"]
+
+    # RAW growths frame (drop NaNs; convert to % for display)
+    raw_df = g[["bank", "per", "d_ps", "d_cif", "d_spc"]].dropna().copy()
+    raw_df["quarter_dt"] = raw_df["per"].dt.to_timestamp()
+    raw_df["d_ps_pct"]  = raw_df["d_ps"]  * 100.0
+    raw_df["d_cif_pct"] = raw_df["d_cif"] * 100.0
+    raw_df["d_spc_pct"] = raw_df["d_spc"] * 100.0
+    raw_df = raw_df[["bank", "quarter_dt", "d_ps_pct", "d_cif_pct", "d_spc_pct"]]
+
+    # RESIDUAL frame (what OLS fits)
+    resid_df = g[["bank", "per", "r_ps", "d_cif", "d_spc"]].dropna().copy()
+    resid_df["quarter_dt"] = resid_df["per"].dt.to_timestamp()
+    resid_df["r_ps_pct"]  = resid_df["r_ps"] * 100.0
+    resid_df["d_cif_pct"] = resid_df["d_cif"] * 100.0
+    resid_df["d_spc_pct"] = resid_df["d_spc"] * 100.0
+    resid_df = resid_df[["bank", "quarter_dt", "r_ps_pct", "d_cif_pct", "d_spc_pct"]]
 
     return raw_df, resid_df
 
-raw_df, resid_df = make_coef_diag_frames(fit_df)
+# Build diagnostics from the currently selected banks
+panel_selected = panel[panel["bank"].isin(banks_pick)].copy()
+raw_df, resid_df = make_coef_diag_frames_from_panel(panel_selected)
+
+with st.expander("Diagnostics status (data availability)", expanded=False):
+    st.write(f"RAW points:      {len(raw_df)}")
+    st.write(f"RESIDUAL points: {len(resid_df)}")
+    if len(raw_df) == 0:
+        st.info("RAW view has no rows. Check that selected banks have enough quarters for QoQ % changes.")
+    if len(resid_df) == 0:
+        st.info("RESIDUAL view has no rows. Often this happens when the first same‑quarter has no baseline yet; try including more banks.")
+``
 
 # =========================
 # PROJECTIONS: Methods A/B/C
