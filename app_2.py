@@ -733,4 +733,4 @@ if not proj_C.empty:
     st.dataframe(show_C, use_container_width=True)
 else:
     st.info("No projections to show for Method C.")
-``
+
