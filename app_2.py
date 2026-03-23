@@ -6,9 +6,8 @@
 #     (True rolling appends the *realized PS factor* so it diverges from Method A.)
 # • Coefficients (α, β_CIF, β_SPC) pooled across banks on residual PS growth vs an expanding same‑quarter baseline
 # • Scenario Shift (±ppt) adds to PS growth each projected quarter
-# • Header auto‑mapping for your CCAP column names (QUARTER, BANK, Purchase Sales (in Bn), Cards in Force (in Bn), Sales / CIF ('000))
-# • Charts rendered via explicit if/else (prevents stray DeltaGenerator text blocks)
-# • Coefficient Diagnostics — scatter + best‑fit lines (raw & residual views)
+# • Header auto‑mapping for CCAP column names (QUARTER, BANK, Purchase Sales (in Bn), Cards in Force (in Bn), Sales / CIF ('000))
+# • Coefficient Diagnostics — scatter + best‑fit lines (raw & residual views), computed from the selected panel (robust)
 # • Delta tables REMOVED for brevity
 
 import re
@@ -99,10 +98,9 @@ def to_numeric(s: pd.Series) -> pd.Series:
     if pd.api.types.is_numeric_dtype(s):
         return pd.to_numeric(s, errors="coerce")
     s2 = s.astype(str).str.replace(",", "", regex=False).str.strip()
-    is_pct = s2.str.contains("%", regex=False, na=False)
     s2 = s2.str.replace("%", "", regex=False)
     out = pd.to_numeric(s2, errors="coerce")
-    return pd.Series(np.where(is_pct, out/100.0, out), index=s.index)
+    return out
 
 def qoq_factors_by_quarter(series: pd.Series, periods: pd.Series) -> Dict[int, List[float]]:
     """Dict q -> list of QoQ factors f = X_t / X_{t-1}, grouped by quarter-of-year of t."""
@@ -111,8 +109,9 @@ def qoq_factors_by_quarter(series: pd.Series, periods: pd.Series) -> Dict[int, L
     f = (s / s.shift(1)).dropna()
     out = {1: [], 2: [], 3: [], 4: []}
     for p, val in f.items():
-        if np.isfinite(val) and val > 0:
-            out[p.quarter].append(float(val))
+        v = float(val)
+        if np.isfinite(v) and v > 0:
+            out[p.quarter].append(v)
     return out
 
 def latest_same_quarter_qoq(series: pd.Series, periods: pd.Series) -> Dict[int, float]:
@@ -194,6 +193,11 @@ if not banks_pick:
     st.info("Select at least one bank.")
     st.stop()
 
+panel_selected = panel[panel["bank"].isin(banks_pick)].copy()
+if panel_selected.empty:
+    st.warning("No rows for the selected bank(s).")
+    st.stop()
+
 # =========================
 # COEFFICIENT ESTIMATION — pooled on residual PS growth vs expanding same‑quarter baseline
 # =========================
@@ -245,18 +249,17 @@ def fit_uplift_coefs(panel_bank: pd.DataFrame) -> Tuple[float,float,float,pd.Dat
     intercept, b_cif, b_spc = float(beta[0]), float(beta[1]), float(beta[2])
     return b_cif, b_spc, intercept, fit
 
-b_cif, b_spc, b_int, fit_df = fit_uplift_coefs(panel[panel["bank"].isin(banks_pick)])
+b_cif, b_spc, b_int, fit_df = fit_uplift_coefs(panel_selected)
 
-# --- Coefficient Diagnostics helper frames (raw and residual views) ---
-# --- Coefficient Diagnostics helper: build from selected panel (robust) ---
-def make_coef_diag_frames_from_panel(panel_sel: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+# =========================
+# COEFFICIENT DIAGNOSTICS FRAMES — BUILT FROM PANEL (robust)
+# =========================
+def make_coef_diag_frames_from_panel(panel_sel: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Build diagnostic frames for coefficient visuals directly from the selected banks' panel.
+    Build diagnostic frames directly from selected banks' panel.
     Returns:
       raw_df   : bank, quarter_dt, d_ps_pct, d_cif_pct, d_spc_pct
       resid_df : bank, quarter_dt, r_ps_pct, d_cif_pct, d_spc_pct
-                 (residual r_ps = d_ps - g_base where g_base is expanding same-quarter average)
-    This mirrors how coefficients are estimated, but isn't limited by the regression's final sample.
     """
     if panel_sel is None or panel_sel.empty:
         return pd.DataFrame(), pd.DataFrame()
@@ -290,35 +293,27 @@ def make_coef_diag_frames_from_panel(panel_sel: pd.DataFrame) -> tuple[pd.DataFr
     # Residual growth
     g["r_ps"] = g["d_ps"] - g["g_base"]
 
-    # RAW growths frame (drop NaNs; convert to % for display)
+    # RAW growths (% for display)
     raw_df = g[["bank", "per", "d_ps", "d_cif", "d_spc"]].dropna().copy()
     raw_df["quarter_dt"] = raw_df["per"].dt.to_timestamp()
-    raw_df["d_ps_pct"]  = raw_df["d_ps"]  * 100.0
-    raw_df["d_cif_pct"] = raw_df["d_cif"] * 100.0
-    raw_df["d_spc_pct"] = raw_df["d_spc"] * 100.0
+    raw_df["d_ps_pct"]  = pd.to_numeric(raw_df["d_ps"], errors="coerce")  * 100.0
+    raw_df["d_cif_pct"] = pd.to_numeric(raw_df["d_cif"], errors="coerce") * 100.0
+    raw_df["d_spc_pct"] = pd.to_numeric(raw_df["d_spc"], errors="coerce") * 100.0
+    raw_df = raw_df.dropna(subset=["d_ps_pct","d_cif_pct","d_spc_pct"])
     raw_df = raw_df[["bank", "quarter_dt", "d_ps_pct", "d_cif_pct", "d_spc_pct"]]
 
-    # RESIDUAL frame (what OLS fits)
+    # RESIDUAL view
     resid_df = g[["bank", "per", "r_ps", "d_cif", "d_spc"]].dropna().copy()
     resid_df["quarter_dt"] = resid_df["per"].dt.to_timestamp()
-    resid_df["r_ps_pct"]  = resid_df["r_ps"] * 100.0
-    resid_df["d_cif_pct"] = resid_df["d_cif"] * 100.0
-    resid_df["d_spc_pct"] = resid_df["d_spc"] * 100.0
+    resid_df["r_ps_pct"]  = pd.to_numeric(resid_df["r_ps"], errors="coerce")  * 100.0
+    resid_df["d_cif_pct"] = pd.to_numeric(resid_df["d_cif"], errors="coerce") * 100.0
+    resid_df["d_spc_pct"] = pd.to_numeric(resid_df["d_spc"], errors="coerce") * 100.0
+    resid_df = resid_df.dropna(subset=["r_ps_pct","d_cif_pct","d_spc_pct"])
     resid_df = resid_df[["bank", "quarter_dt", "r_ps_pct", "d_cif_pct", "d_spc_pct"]]
 
     return raw_df, resid_df
 
-# Build diagnostics from the currently selected banks
-panel_selected = panel[panel["bank"].isin(banks_pick)].copy()
 raw_df, resid_df = make_coef_diag_frames_from_panel(panel_selected)
-
-with st.expander("Diagnostics status (data availability)", expanded=False):
-    st.write(f"RAW points:      {len(raw_df)}")
-    st.write(f"RESIDUAL points: {len(resid_df)}")
-    if len(raw_df) == 0:
-        st.info("RAW view has no rows. Check that selected banks have enough quarters for QoQ % changes.")
-    if len(resid_df) == 0:
-        st.info("RESIDUAL view has no rows. Often this happens when the first same‑quarter has no baseline yet; try including more banks.")
 
 # =========================
 # PROJECTIONS: Methods A/B/C
@@ -527,7 +522,7 @@ def project_method_C(bank_df: pd.DataFrame, scenario_adj_prop: float, K: int) ->
 # =========================
 proj_A_frames, proj_B_frames, proj_C_frames, hist_frames = [], [], [], []
 for b in banks_pick:
-    gb = panel[panel["bank"] == b][["bank","quarter_dt","purchase_sales_bn","cards_in_force_bn","sales_per_cif_000"]]
+    gb = panel_selected[panel_selected["bank"] == b][["bank","quarter_dt","purchase_sales_bn","cards_in_force_bn","sales_per_cif_000"]]
     if gb.shape[0] < 3:
         continue
     hist_frames.append(gb.assign(method="Actual"))
@@ -573,10 +568,11 @@ def chart_method(method_name: str, metric_code: str):
     overlays = []
 
     # Actual
-    hist_all = pd.concat(hist_frames, ignore_index=True)
-    actual = hist_all[["bank","quarter_dt",metric_code]].dropna().copy()
-    actual = actual.rename(columns={metric_code:"value"}).assign(scenario="Actual")
-    overlays.append(actual[["bank","quarter_dt","value","scenario"]])
+    hist_all = pd.concat(hist_frames, ignore_index=True) if hist_frames else pd.DataFrame()
+    if not hist_all.empty and metric_code in hist_all.columns:
+        actual = hist_all[["bank","quarter_dt",metric_code]].dropna().copy()
+        actual = actual.rename(columns={metric_code:"value"}).assign(scenario="Actual")
+        overlays.append(actual[["bank","quarter_dt","value","scenario"]])
 
     # Projections
     mapping = {
@@ -585,7 +581,8 @@ def chart_method(method_name: str, metric_code: str):
         "Method C (True Rolling QoQ + uplift)":  proj_C,
     }
     dfp = mapping.get(method_name, pd.DataFrame())
-    if dfp.empty: return None
+    if dfp.empty: 
+        return None
 
     rename_map = {
         "projected_cif_bn":"cards_in_force_bn",
@@ -597,22 +594,27 @@ def chart_method(method_name: str, metric_code: str):
     use = use[["bank","quarter_dt", metric_code, "method"]].rename(columns={metric_code:"value","method":"scenario"})
     overlays.append(use)
 
-    overlay = pd.concat(overlays, ignore_index=True)
+    overlay = pd.concat(overlays, ignore_index=True) if overlays else pd.DataFrame()
+    if overlay.empty: 
+        return None
 
-    actual_line = (
-        alt.Chart(overlay).transform_filter(alt.datum.scenario == "Actual")
-          .mark_line(point=True, strokeWidth=2)
-          .encode(
-              x=alt.X("quarter_dt:T", title="Quarter"),
-              y=alt.Y("value:Q", title=metric_label),
-              color=alt.Color("bank:N", title="Bank", sort=banks_pick, scale=color_scale),
-              tooltip=[alt.Tooltip("bank:N"),
-                       alt.Tooltip("quarter_dt:T", title="Quarter"),
-                       alt.Tooltip("value:Q", title=metric_label, format=",.2f"),
-                       alt.Tooltip("scenario:N")]
-          ).properties(height=360)
-    )
-    proj_line = (
+    actual_layer = None
+    if "Actual" in overlay["scenario"].unique():
+        actual_layer = (
+            alt.Chart(overlay).transform_filter(alt.datum.scenario == "Actual")
+              .mark_line(point=True, strokeWidth=2)
+              .encode(
+                  x=alt.X("quarter_dt:T", title="Quarter"),
+                  y=alt.Y("value:Q", title=metric_label),
+                  color=alt.Color("bank:N", title="Bank", sort=banks_pick, scale=color_scale),
+                  tooltip=[alt.Tooltip("bank:N"),
+                           alt.Tooltip("quarter_dt:T", title="Quarter"),
+                           alt.Tooltip("value:Q", title=metric_label, format=",.2f"),
+                           alt.Tooltip("scenario:N")]
+              ).properties(height=360)
+        )
+
+    proj_layer = (
         alt.Chart(overlay).transform_filter(alt.datum.scenario != "Actual")
           .mark_line(point=False, strokeWidth=2, strokeDash=[6,4])
           .encode(
@@ -624,7 +626,8 @@ def chart_method(method_name: str, metric_code: str):
                        alt.Tooltip("scenario:N")]
           ).properties(height=360)
     )
-    return alt.layer(actual_line, proj_line)
+
+    return proj_layer if actual_layer is None else alt.layer(actual_layer, proj_layer)
 
 metric_pick = st.selectbox(
     "Metric to chart",
@@ -661,11 +664,24 @@ with col3:
 # =========================
 st.subheader("Coefficient Diagnostics — Scatterplots with Best‑Fit Line")
 
+with st.expander("Diagnostics status (data availability)", expanded=False):
+    st.write(f"RAW points:      {len(raw_df)}")
+    st.write(f"RESIDUAL points: {len(resid_df)}")
+    if len(raw_df) == 0:
+        st.info("RAW view has no rows. Ensure selected banks have enough quarters for QoQ % changes.")
+    if len(resid_df) == 0:
+        st.info("RESIDUAL view has no rows. This can happen with short histories; try including more banks.")
+
 def scatter_with_line(df: pd.DataFrame, x_col: str, y_col: str,
                       x_title: str, y_title: str, color_scale=alt.Scale(scheme='tableau10')):
     if df is None or df.empty:
         return None
-    base = alt.Chart(df).mark_circle(size=60, opacity=0.55).encode(
+    # If there are very few points or zero variance on X/Y, skip regression line (show scatter only)
+    add_line = False
+    if len(df) >= 3 and df[x_col].std(ddof=0) > 0 and df[y_col].std(ddof=0) > 0:
+        add_line = True
+
+    base = alt.Chart(df).mark_circle(size=60, opacity=0.6).encode(
         x=alt.X(f"{x_col}:Q", title=x_title),
         y=alt.Y(f"{y_col}:Q", title=y_title),
         color=alt.Color("bank:N", legend=None, scale=color_scale),
@@ -675,11 +691,15 @@ def scatter_with_line(df: pd.DataFrame, x_col: str, y_col: str,
             alt.Tooltip(x_col, title=x_title, format=",.2f"),
             alt.Tooltip(y_col, title=y_title, format=",.2f"),
         ]
-    )
-    line = alt.Chart(df).transform_regression(x_col, y_col).mark_line(
-        color="#e31a1c", strokeWidth=2
-    )
-    return (base + line).properties(height=320)
+    ).properties(height=320)
+
+    if add_line:
+        line = alt.Chart(df).transform_regression(x_col, y_col).mark_line(
+            color="#e31a1c", strokeWidth=2
+        )
+        return (base + line)
+    else:
+        return base
 
 # Row 1: RAW growths (intuitive view)
 st.markdown("**Raw growths (QoQ %): Δ% Purchase Sales vs Drivers**")
