@@ -1,14 +1,15 @@
 # app.py
 # CCAP — Methods A/B/C: PS baselines + CIF & Sales/CIF uplift + Scenario Shift + Coef Diagnostics
-# • A: Baseline & drivers = AVERAGE of all historical same‑quarter QoQ factors (fixed)
+# • A: Baseline & drivers = AVERAGE of all historical same‑quarter QoQ factors (fixed, history‑only)
 # • B: Baseline & drivers = LATEST same‑quarter QoQ factor (carry‑forward)
-# • C: Baseline & drivers = TRUE ROLLING same‑quarter QoQ average using last K entries (history + forecasted)
-#     (True rolling uses *realized PS factors* so it diverges from history‑only Method A.)
+# • C: Baseline & drivers = TRUE ROLLING same‑quarter QoQ using last K entries (history + forecasted)
+#     (True rolling appends the *realized PS factor* so it diverges from Method A.)
 # • Coefficients (α, β_CIF, β_SPC) pooled across banks on residual PS growth vs an expanding same‑quarter baseline
 # • Scenario Shift (±ppt) adds to PS growth each projected quarter
 # • Header auto‑mapping for your CCAP column names (QUARTER, BANK, Purchase Sales (in Bn), Cards in Force (in Bn), Sales / CIF ('000))
-# • Charts rendered via explicit if/else to avoid stray DeltaGenerator text
-# • NEW: Coefficient Diagnostics — scatter + best‑fit lines (raw and residual views)
+# • Charts rendered via explicit if/else (prevents stray DeltaGenerator text blocks)
+# • Coefficient Diagnostics — scatter + best‑fit lines (raw & residual views)
+# • Delta tables REMOVED for brevity
 
 import re
 from typing import Dict, List, Tuple
@@ -127,13 +128,6 @@ def latest_same_quarter_qoq(series: pd.Series, periods: pd.Series) -> Dict[int, 
         if not np.isfinite(d[q]) or d[q] <= 0:
             d[q] = 1.0
     return d
-
-def format_percent_cols(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
-    out = df.copy()
-    for c in cols:
-        if c in out.columns:
-            out[c] = out[c].apply(lambda x: (f"{x:.2f}%" if pd.notna(x) else None))
-    return out
 
 # =========================
 # UI
@@ -268,12 +262,18 @@ def make_coef_diag_frames(fit_df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFr
 
     # Raw growths (% for display)
     raw_df = tmp[["bank","quarter_dt","d_ps","d_cif","d_spc"]].dropna().copy()
+    for c in ["d_ps","d_cif","d_spc"]:
+        raw_df[c] = pd.to_numeric(raw_df[c], errors="coerce")
+    raw_df = raw_df.dropna()
     raw_df["d_ps_pct"]  = raw_df["d_ps"]*100.0
     raw_df["d_cif_pct"] = raw_df["d_cif"]*100.0
     raw_df["d_spc_pct"] = raw_df["d_spc"]*100.0
 
     # Residual growth vs drivers
     resid_df = tmp[["bank","quarter_dt","r_ps","d_cif","d_spc"]].dropna().copy()
+    for c in ["r_ps","d_cif","d_spc"]:
+        resid_df[c] = pd.to_numeric(resid_df[c], errors="coerce")
+    resid_df = resid_df.dropna()
     resid_df["r_ps_pct"]  = resid_df["r_ps"]*100.0
     resid_df["d_cif_pct"] = resid_df["d_cif"]*100.0
     resid_df["d_spc_pct"] = resid_df["d_spc"]*100.0
@@ -399,11 +399,9 @@ def project_method_B(bank_df: pd.DataFrame, scenario_adj_prop: float) -> pd.Data
 def project_method_C(bank_df: pd.DataFrame, scenario_adj_prop: float, K: int) -> pd.DataFrame:
     """
     Method C (True Rolling QoQ + uplift):
-      • Baseline PS growth uses a true rolling same‑quarter average:
-          average of the last K same‑quarter *realized* PS factors (history + forecasted‑to‑date).
-      • Driver growths (Δ%CIF, Δ%SPC) use the same rolling logic (average of last K same‑quarter factors).
-      • Total PS growth = g_base + uplift + scenario_adj_prop
-      • Append the *realized total PS factor* (PS_t / PS_{t-1}) into PS rolling pool.
+      • Baseline PS growth = average of last K same‑quarter *realized* PS factors (history + forecasted‑to‑date).
+      • Driver growths (Δ%CIF, Δ%SPC) = average of last K same‑quarter factors (history + forecasted).
+      • Append the *realized total PS factor* (PS_t / PS_{t-1}) into PS rolling pool so next same‑quarter adapts.
     """
     gb = bank_df.sort_values("quarter_dt").copy()
     last_dt  = gb["quarter_dt"].dropna().max()
@@ -680,57 +678,3 @@ with colE2:
         st.altair_chart(ch_resid_spc, use_container_width=True)
     else:
         st.info("Not enough data to plot residual Δ%PS vs Δ%Sales/CIF.")
-
-# =========================
-# TABLES — concise delta tables
-# =========================
-def tidy_sort_percent(dfp: pd.DataFrame, cols_pct: List[str]) -> pd.DataFrame:
-    if dfp.empty: return dfp
-    bank_order_map = {b: i for i, b in enumerate(BANK_ORDER_PREF)}
-    dfp["_b_sort"] = dfp["bank"].map(lambda x: bank_order_map.get(x, 999))
-    dfp["_q_sort"] = dfp["quarter"].apply(lambda q: (int(q[:4]) * 4) + int(q[-1]))
-    dfp = dfp.sort_values(["_q_sort","_b_sort","bank"]).drop(columns=["_q_sort","_b_sort"])
-    return format_percent_cols(dfp, cols_pct)
-
-st.subheader("Delta Table — Method A")
-if not proj_A.empty:
-    colsA = ["quarter","bank",
-             "projected_purchase_sales_bn","projected_cif_bn","projected_sales_per_cif_000",
-             "delta_purchase_sales_pct","delta_cif_pct","delta_sales_per_cif_000_pct",
-             "ps_uplift_pp","ps_uplift_multiplier","scenario_shift_pp"]
-    show_A = tidy_sort_percent(proj_A[colsA], ["delta_purchase_sales_pct","delta_cif_pct","delta_sales_per_cif_000_pct"])
-    show_A["ps_uplift_pp"]         = show_A["ps_uplift_pp"].apply(lambda x: f"{x:.2f} pp" if pd.notna(x) else None)
-    show_A["ps_uplift_multiplier"] = show_A["ps_uplift_multiplier"].apply(lambda x: f"{x:.4f} ×" if pd.notna(x) else None)
-    show_A["scenario_shift_pp"]    = show_A["scenario_shift_pp"].apply(lambda x: f"{x:.2f} pp" if pd.notna(x) else None)
-    st.dataframe(show_A, use_container_width=True)
-else:
-    st.info("No projections to show for Method A.")
-
-st.subheader("Delta Table — Method B")
-if not proj_B.empty:
-    colsB = ["quarter","bank",
-             "projected_purchase_sales_bn","projected_cif_bn","projected_sales_per_cif_000",
-             "delta_purchase_sales_pct","delta_cif_pct","delta_sales_per_cif_000_pct",
-             "ps_uplift_pp","ps_uplift_multiplier","scenario_shift_pp"]
-    show_B = tidy_sort_percent(proj_B[colsB], ["delta_purchase_sales_pct","delta_cif_pct","delta_sales_per_cif_000_pct"])
-    show_B["ps_uplift_pp"]         = show_B["ps_uplift_pp"].apply(lambda x: f"{x:.2f} pp" if pd.notna(x) else None)
-    show_B["ps_uplift_multiplier"] = show_B["ps_uplift_multiplier"].apply(lambda x: f"{x:.4f} ×" if pd.notna(x) else None)
-    show_B["scenario_shift_pp"]    = show_B["scenario_shift_pp"].apply(lambda x: f"{x:.2f} pp" if pd.notna(x) else None)
-    st.dataframe(show_B, use_container_width=True)
-else:
-    st.info("No projections to show for Method B.")
-
-st.subheader("Delta Table — Method C")
-if not proj_C.empty:
-    colsC = ["quarter","bank",
-             "projected_purchase_sales_bn","projected_cif_bn","projected_sales_per_cif_000",
-             "delta_purchase_sales_pct","delta_cif_pct","delta_sales_per_cif_000_pct",
-             "ps_uplift_pp","ps_uplift_multiplier","scenario_shift_pp"]
-    show_C = tidy_sort_percent(proj_C[colsC], ["delta_purchase_sales_pct","delta_cif_pct","delta_sales_per_cif_000_pct"])
-    show_C["ps_uplift_pp"]         = show_C["ps_uplift_pp"].apply(lambda x: f"{x:.2f} pp" if pd.notna(x) else None)
-    show_C["ps_uplift_multiplier"] = show_C["ps_uplift_multiplier"].apply(lambda x: f"{x:.4f} ×" if pd.notna(x) else None)
-    show_C["scenario_shift_pp"]    = show_C["scenario_shift_pp"].apply(lambda x: f"{x:.2f} pp" if pd.notna(x) else None)
-    st.dataframe(show_C, use_container_width=True)
-else:
-    st.info("No projections to show for Method C.")
-
