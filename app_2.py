@@ -5,7 +5,8 @@
 # • C: Baseline & drivers = TRUE ROLLING same‑quarter QoQ average using last K entries (history + forecasted)
 # • Coefficients (α, β_CIF, β_SPC) are pooled across banks on residual PS growth vs an expanding same‑quarter baseline
 # • Scenario Shift (±ppt) adds to PS growth each projected quarter
-# • NO column-mapping UI; CSV must provide exact required columns.
+# • Header auto‑mapping is enabled for your CCAP column names
+# • Long tables below charts are removed; optional CSV downloads provided
 
 import re
 from typing import Dict, List, Tuple
@@ -22,7 +23,6 @@ RAW_URL = "https://raw.githubusercontent.com/vincentlascano000/ccap_data/main/CC
 TARGET_END = pd.Period("2028Q4", freq="Q")  # inclusive
 BANK_ORDER_PREF = ["UB", "BDO", "BPI", "SECBANK", "MB", "RCBC"]
 
-# Friendly labels
 FRIENDLY = {
     "purchase_sales_bn": "Purchase Sales (Bn)",
     "cards_in_force_bn": "Cards in Force (Bn)",
@@ -30,31 +30,59 @@ FRIENDLY = {
 }
 
 # =========================
+# HEADER AUTO‑MAPPING (resilient to cases/punctuation)
+# =========================
+def _canon(s: str) -> str:
+    s = str(s).strip().lower()
+    s = re.sub(r"[()\[\]’'`]", "", s)
+    s = s.replace("/", " ").replace("-", " ")
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+HEADER_MAP = {
+    "quarter": "quarter",                          # QUARTER
+    "bank": "bank",                                # BANK
+    "purchase sales in bn": "purchase_sales_bn",   # Purchase Sales (in Bn)
+    "purchase sales bn": "purchase_sales_bn",
+    "cards in force in bn": "cards_in_force_bn",   # Cards in Force (in Bn)
+    "cards in force bn": "cards_in_force_bn",
+    "sales cif 000": "sales_per_cif_000",          # Sales / CIF ('000)
+    "sales per cif 000": "sales_per_cif_000",
+}
+
+def apply_header_map(df: pd.DataFrame) -> pd.DataFrame:
+    ren = {}
+    for col in df.columns:
+        key = _canon(col)
+        if key in HEADER_MAP:
+            ren[col] = HEADER_MAP[key]
+    return df.rename(columns=ren)
+
+# =========================
 # HELPERS
 # =========================
 def parse_quarter_token(value: str):
-    """Parse '1Q23', 'Q1 2023', '2023 Q1', or any date-like string → (label, quarter-end Timestamp)."""
+    """Parse '1Q23', 'Q1 2023', '2023 Q1', or date → (label, quarter-end Timestamp)."""
     if pd.isna(value): return None, pd.NaT
     s = str(value).strip().upper().replace("-", " ").replace("/", " ")
     s = re.sub(r"\s+", " ", s)
-    m = re.match(r"^([1-4])Q(\d{2,4})$", s)  # 1Q23 / 4Q2025
+    m = re.match(r"^([1-4])Q(\d{2,4})$", s)
     if m:
         q, yy = int(m.group(1)), m.group(2)
         year = 2000 + int(yy) if len(yy) == 2 else int(yy)
         per = pd.Period(freq="Q", year=year, quarter=q)
         return f"{year}Q{q}", per.to_timestamp(how="end")
-    m = re.match(r"^Q([1-4])\s+(\d{2,4})$", s)  # Q1 2023
+    m = re.match(r"^Q([1-4])\s+(\d{2,4})$", s)
     if m:
         q, yy = int(m.group(1)), m.group(2)
         year = 2000 + int(yy) if len(yy) == 2 else int(yy)
         per = pd.Period(freq="Q", year=year, quarter=q)
         return f"{year}Q{q}", per.to_timestamp(how="end")
-    m = re.match(r"^(\d{4})\s*Q([1-4])$", s)  # 2023 Q1
+    m = re.match(r"^(\d{4})\s*Q([1-4])$", s)
     if m:
         year, q = int(m.group(1)), int(m.group(2))
         per = pd.Period(freq="Q", year=year, quarter=q)
         return f"{year}Q{q}", per.to_timestamp(how="end")
-    # Fallback to datetime
     try:
         dt = pd.to_datetime(s, errors="raise")
         per = pd.Period(dt, freq="Q")
@@ -67,7 +95,7 @@ def to_numeric(s: pd.Series) -> pd.Series:
         return pd.to_numeric(s, errors="coerce")
     s2 = s.astype(str).str.replace(",", "", regex=False).str.strip()
     is_pct = s2.str.contains("%", regex=False, na=False)
-    s2 = s2.str.replace("%", "", regex=False)
+    s2 = s2.replace("%", "", regex=False)
     out = pd.to_numeric(s2, errors="coerce")
     return pd.Series(np.where(is_pct, out/100.0, out), index=s.index)
 
@@ -122,32 +150,31 @@ st.sidebar.header("Method C (True rolling window)")
 rolling_window_years = st.sidebar.slider("Last K same‑quarter entries to average (history + forecasted)", 3, 8, 6, 1)
 
 # =========================
-# LOAD & VALIDATE DATA (NO column mapping; expect exact names)
+# LOAD & VALIDATE DATA (with header auto‑mapping)
 # =========================
 try:
     raw = pd.read_csv(RAW_URL, engine="python")
 except Exception:
     raw = pd.read_csv(RAW_URL, engine="python", encoding="utf-8-sig")
 
-# Require exact columns
-required_any = [["quarter_dt"], ["quarter"]]  # one of these for time
-required_all = ["bank", "purchase_sales_bn", "cards_in_force_bn", "sales_per_cif_000"]
+df = apply_header_map(raw.copy())
 
-missing = [c for c in required_all if c not in raw.columns]
-if missing:
-    st.error(f"Missing required column(s): {missing}. "
-             f"Expected columns include: {required_all} and either 'quarter_dt' or 'quarter'. "
-             f"Found: {list(raw.columns)}")
+has_time = ("quarter_dt" in df.columns) or ("quarter" in df.columns)
+required = ["bank", "purchase_sales_bn", "cards_in_force_bn", "sales_per_cif_000"]
+missing = [c for c in required if c not in df.columns]
+if missing or not has_time:
+    st.error(
+        "Missing required columns after auto-mapping.\n\n"
+        f"Required: {required} and either 'quarter_dt' or 'quarter'.\n"
+        f"Found (source): {list(raw.columns)}\n"
+        f"Mapped columns: {list(df.columns)}\n\n"
+        "Tip: Headers like 'QUARTER', 'BANK', 'Purchase Sales (in Bn)', "
+        "'Cards in Force (in Bn)', and \"Sales / CIF ('000)\" are supported."
+    )
     st.stop()
 
-df = raw.copy()
-
-# Ensure a datetime column quarter_dt exists
+# Make quarter_dt if needed
 if "quarter_dt" not in df.columns:
-    if "quarter" not in df.columns:
-        st.error("Missing both 'quarter_dt' and 'quarter'. Provide at least one.")
-        st.stop()
-    # Parse 'quarter' to quarter_dt
     parsed = df["quarter"].apply(parse_quarter_token)
     df["quarter_dt"] = parsed.apply(lambda x: x[1] if isinstance(x, tuple) else pd.NaT)
 
@@ -155,11 +182,12 @@ if "quarter_dt" not in df.columns:
 for c in ["purchase_sales_bn", "cards_in_force_bn", "sales_per_cif_000"]:
     df[c] = to_numeric(df[c])
 
-# Minimal cleaning
-panel = (df[["bank","quarter_dt","purchase_sales_bn","cards_in_force_bn","sales_per_cif_000"]]
-         .dropna(subset=["bank","quarter_dt"])
-         .sort_values(["bank","quarter_dt"])
-         .reset_index(drop=True))
+panel = (
+    df[["bank","quarter_dt","purchase_sales_bn","cards_in_force_bn","sales_per_cif_000"]]
+    .dropna(subset=["bank","quarter_dt"])
+    .sort_values(["bank","quarter_dt"])
+    .reset_index(drop=True)
+)
 
 # Bank selection
 banks_all = sorted(panel["bank"].dropna().unique().tolist(),
@@ -175,7 +203,7 @@ if not banks_pick:
 def fit_uplift_coefs(panel_bank: pd.DataFrame) -> Tuple[float,float,float,pd.DataFrame]:
     """
     Pooled OLS on residual PS growth vs Δ%CIF and Δ%SPC (Sales/CIF).
-    Baseline for residualization: expanding same‑quarter average of d_ps (no tunable lookback).
+    Baseline for residualization: expanding same‑quarter average of d_ps.
     """
     g = panel_bank.sort_values(["bank","quarter_dt"]).copy()
     g["per"] = g["quarter_dt"].dt.to_period("Q")
@@ -436,7 +464,7 @@ for dfp in [proj_A, proj_B, proj_C]:
             dfp[col] = dfp[col].round(int(round_dec))
 
 # =========================
-# COEFFICIENTS PANEL
+# COEFFICIENTS PANEL (keep)
 # =========================
 with st.expander("Coefficients used for uplift (pooled, residualized vs PS baseline)", expanded=True):
     st.markdown(
@@ -490,11 +518,13 @@ def chart_method(method_name: str, metric_code: str):
         alt.Chart(overlay).transform_filter(alt.datum.scenario == "Actual")
           .mark_line(point=True, strokeWidth=2)
           .encode(
-              x=alt.X("quarter_dt:T", title="Quarter", axis=alt.Axis(format="%Y Q%q")),
+              x=alt.X("quarter_dt:T", title="Quarter"),
               y=alt.Y("value:Q", title=metric_label),
               color=alt.Color("bank:N", title="Bank", sort=banks_pick, scale=color_scale),
-              tooltip=[alt.Tooltip("bank:N"), alt.Tooltip("quarter_dt:T", format="%Y Q%q"),
-                       alt.Tooltip("value:Q", title=metric_label, format=",.2f"), alt.Tooltip("scenario:N")]
+              tooltip=[alt.Tooltip("bank:N"),
+                       alt.Tooltip("quarter_dt:T", title="Quarter"),
+                       alt.Tooltip("value:Q", title=metric_label, format=",.2f"),
+                       alt.Tooltip("scenario:N")]
           ).properties(height=360)
     )
     proj_line = (
@@ -503,8 +533,10 @@ def chart_method(method_name: str, metric_code: str):
           .encode(
               x="quarter_dt:T", y="value:Q",
               color=alt.Color("bank:N", title="Bank", sort=banks_pick, scale=color_scale),
-              tooltip=[alt.Tooltip("bank:N"), alt.Tooltip("quarter_dt:T", format="%Y Q%q"),
-                       alt.Tooltip("value:Q", title=metric_label, format=",.2f"), alt.Tooltip("scenario:N")]
+              tooltip=[alt.Tooltip("bank:N"),
+                       alt.Tooltip("quarter_dt:T", title="Quarter"),
+                       alt.Tooltip("value:Q", title=metric_label, format=",.2f"),
+                       alt.Tooltip("scenario:N")]
           ).properties(height=360)
     )
     return alt.layer(actual_line, proj_line)
@@ -531,54 +563,16 @@ with col3:
     st.altair_chart(chC, use_container_width=True) if chC else st.info("No projections for Method C.")
 
 # =========================
-# TABLES — A/B/C with % deltas and uplift columns
+# OPTIONAL: CSV DOWNLOADS (no long tables rendered)
 # =========================
-def tidy_sort_percent(dfp: pd.DataFrame, cols_pct: List[str]) -> pd.DataFrame:
-    if dfp.empty: return dfp
-    bank_order_map = {b: i for i, b in enumerate(BANK_ORDER_PREF)}
-    dfp["_b_sort"] = dfp["bank"].map(lambda x: bank_order_map.get(x, 999))
-    dfp["_q_sort"] = dfp["quarter"].apply(lambda q: (int(q[:4]) * 4) + int(q[-1]))
-    dfp = dfp.sort_values(["_q_sort","_b_sort","bank"]).drop(columns=["_q_sort","_b_sort"])
-    return format_percent_cols(dfp, cols_pct)
-
-st.subheader("Projections Table — Method A (Avg QoQ + uplift)")
-if not proj_A.empty:
-    colsA = ["quarter","bank","method",
-             "projected_purchase_sales_bn","projected_cif_bn","projected_sales_per_cif_000",
-             "delta_purchase_sales_pct","delta_cif_pct","delta_sales_per_cif_000_pct",
-             "ps_uplift_pp","ps_uplift_multiplier","scenario_shift_pp"]
-    show_A = tidy_sort_percent(proj_A[colsA], ["delta_purchase_sales_pct","delta_cif_pct","delta_sales_per_cif_000_pct"])
-    show_A["ps_uplift_pp"]         = show_A["ps_uplift_pp"].apply(lambda x: f"{x:.2f} pp" if pd.notna(x) else None)
-    show_A["ps_uplift_multiplier"] = show_A["ps_uplift_multiplier"].apply(lambda x: f"{x:.4f} ×" if pd.notna(x) else None)
-    show_A["scenario_shift_pp"]    = show_A["scenario_shift_pp"].apply(lambda x: f"{x:.2f} pp" if pd.notna(x) else None)
-    st.dataframe(show_A, use_container_width=True)
-else:
-    st.info("No projections to show for Method A.")
-
-st.subheader("Projections Table — Method B (Latest QoQ + uplift)")
-if not proj_B.empty:
-    colsB = ["quarter","bank","method",
-             "projected_purchase_sales_bn","projected_cif_bn","projected_sales_per_cif_000",
-             "delta_purchase_sales_pct","delta_cif_pct","delta_sales_per_cif_000_pct",
-             "ps_uplift_pp","ps_uplift_multiplier","scenario_shift_pp"]
-    show_B = tidy_sort_percent(proj_B[colsB], ["delta_purchase_sales_pct","delta_cif_pct","delta_sales_per_cif_000_pct"])
-    show_B["ps_uplift_pp"]         = show_B["ps_uplift_pp"].apply(lambda x: f"{x:.2f} pp" if pd.notna(x) else None)
-    show_B["ps_uplift_multiplier"] = show_B["ps_uplift_multiplier"].apply(lambda x: f"{x:.4f} ×" if pd.notna(x) else None)
-    show_B["scenario_shift_pp"]    = show_B["scenario_shift_pp"].apply(lambda x: f"{x:.2f} pp" if pd.notna(x) else None)
-    st.dataframe(show_B, use_container_width=True)
-else:
-    st.info("No projections to show for Method B.")
-
-st.subheader("Projections Table — Method C (True Rolling QoQ + uplift)")
-if not proj_C.empty:
-    colsC = ["quarter","bank","method",
-             "projected_purchase_sales_bn","projected_cif_bn","projected_sales_per_cif_000",
-             "delta_purchase_sales_pct","delta_cif_pct","delta_sales_per_cif_000_pct",
-             "ps_uplift_pp","ps_uplift_multiplier","scenario_shift_pp"]
-    show_C = tidy_sort_percent(proj_C[colsC], ["delta_purchase_sales_pct","delta_cif_pct","delta_sales_per_cif_000_pct"])
-    show_C["ps_uplift_pp"]         = show_C["ps_uplift_pp"].apply(lambda x: f"{x:.2f} pp" if pd.notna(x) else None)
-    show_C["ps_uplift_multiplier"] = show_C["ps_uplift_multiplier"].apply(lambda x: f"{x:.4f} ×" if pd.notna(x) else None)
-    show_C["scenario_shift_pp"]    = show_C["scenario_shift_pp"].apply(lambda x: f"{x:.2f} pp" if pd.notna(x) else None)
-    st.dataframe(show_C, use_container_width=True)
-else:
-    st.info("No projections to show for Method C.")
+st.subheader("Downloads (optional)")
+colD1, colD2, colD3 = st.columns(3)
+with colD1:
+    if not proj_A.empty:
+        st.download_button("Download Method A CSV", data=proj_A.to_csv(index=False), file_name="proj_method_A.csv", mime="text/csv")
+with colD2:
+    if not proj_B.empty:
+        st.download_button("Download Method B CSV", data=proj_B.to_csv(index=False), file_name="proj_method_B.csv", mime="text/csv")
+with colD3:
+    if not proj_C.empty:
+        st.download_button("Download Method C CSV", data=proj_C.to_csv(index=False), file_name="proj_method_C.csv", mime="text/csv")
