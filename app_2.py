@@ -1,12 +1,14 @@
 # app.py
-# CCAP — Methods A/B/C: PS baselines + CIF & Sales/CIF uplift + Scenario Shift
+# CCAP — Methods A/B/C: PS baselines + CIF & Sales/CIF uplift + Scenario Shift + Coef Diagnostics
 # • A: Baseline & drivers = AVERAGE of all historical same‑quarter QoQ factors (fixed)
 # • B: Baseline & drivers = LATEST same‑quarter QoQ factor (carry‑forward)
 # • C: Baseline & drivers = TRUE ROLLING same‑quarter QoQ average using last K entries (history + forecasted)
+#     (True rolling uses *realized PS factors* so it diverges from history‑only Method A.)
 # • Coefficients (α, β_CIF, β_SPC) pooled across banks on residual PS growth vs an expanding same‑quarter baseline
 # • Scenario Shift (±ppt) adds to PS growth each projected quarter
 # • Header auto‑mapping for your CCAP column names (QUARTER, BANK, Purchase Sales (in Bn), Cards in Force (in Bn), Sales / CIF ('000))
-# • Fix: charts use explicit if/else to prevent stray DeltaGenerator blocks being printed
+# • Charts rendered via explicit if/else to avoid stray DeltaGenerator text
+# • NEW: Coefficient Diagnostics — scatter + best‑fit lines (raw and residual views)
 
 import re
 from typing import Dict, List, Tuple
@@ -250,6 +252,35 @@ def fit_uplift_coefs(panel_bank: pd.DataFrame) -> Tuple[float,float,float,pd.Dat
     return b_cif, b_spc, intercept, fit
 
 b_cif, b_spc, b_int, fit_df = fit_uplift_coefs(panel[panel["bank"].isin(banks_pick)])
+
+# --- Coefficient Diagnostics helper frames (raw and residual views) ---
+def make_coef_diag_frames(fit_df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Returns:
+      raw_df  : bank, quarter_dt, d_ps_pct, d_cif_pct, d_spc_pct
+      resid_df: bank, quarter_dt, r_ps_pct, d_cif_pct, d_spc_pct
+    """
+    if fit_df is None or fit_df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    tmp = fit_df.copy()
+    tmp["quarter_dt"] = tmp["per"].dt.to_timestamp() if "per" in tmp.columns else pd.NaT
+
+    # Raw growths (% for display)
+    raw_df = tmp[["bank","quarter_dt","d_ps","d_cif","d_spc"]].dropna().copy()
+    raw_df["d_ps_pct"]  = raw_df["d_ps"]*100.0
+    raw_df["d_cif_pct"] = raw_df["d_cif"]*100.0
+    raw_df["d_spc_pct"] = raw_df["d_spc"]*100.0
+
+    # Residual growth vs drivers
+    resid_df = tmp[["bank","quarter_dt","r_ps","d_cif","d_spc"]].dropna().copy()
+    resid_df["r_ps_pct"]  = resid_df["r_ps"]*100.0
+    resid_df["d_cif_pct"] = resid_df["d_cif"]*100.0
+    resid_df["d_spc_pct"] = resid_df["d_spc"]*100.0
+
+    return raw_df, resid_df
+
+raw_df, resid_df = make_coef_diag_frames(fit_df)
 
 # =========================
 # PROJECTIONS: Methods A/B/C
@@ -590,7 +621,68 @@ with col3:
         st.info("No projections for Method C.")
 
 # =========================
-# TABLES — concise delta tables (kept)
+# COEFFICIENT DIAGNOSTICS — scatterplots with best‑fit lines
+# =========================
+st.subheader("Coefficient Diagnostics — Scatterplots with Best‑Fit Line")
+
+def scatter_with_line(df: pd.DataFrame, x_col: str, y_col: str,
+                      x_title: str, y_title: str, color_scale=alt.Scale(scheme='tableau10')):
+    if df is None or df.empty:
+        return None
+    base = alt.Chart(df).mark_circle(size=60, opacity=0.55).encode(
+        x=alt.X(f"{x_col}:Q", title=x_title),
+        y=alt.Y(f"{y_col}:Q", title=y_title),
+        color=alt.Color("bank:N", legend=None, scale=color_scale),
+        tooltip=[
+            alt.Tooltip("bank:N"),
+            alt.Tooltip("quarter_dt:T", title="Quarter"),
+            alt.Tooltip(x_col, title=x_title, format=",.2f"),
+            alt.Tooltip(y_col, title=y_title, format=",.2f"),
+        ]
+    )
+    line = alt.Chart(df).transform_regression(x_col, y_col).mark_line(
+        color="#e31a1c", strokeWidth=2
+    )
+    return (base + line).properties(height=320)
+
+# Row 1: RAW growths (intuitive view)
+st.markdown("**Raw growths (QoQ %): Δ% Purchase Sales vs Drivers**")
+colR1, colR2 = st.columns(2)
+with colR1:
+    ch_raw_cif = scatter_with_line(raw_df, "d_cif_pct", "d_ps_pct",
+                                   "Δ% CIF (QoQ, %)", "Δ% Purchase Sales (QoQ, %)")
+    if ch_raw_cif is not None:
+        st.altair_chart(ch_raw_cif, use_container_width=True)
+    else:
+        st.info("Not enough data to plot Δ%PS vs Δ%CIF.")
+with colR2:
+    ch_raw_spc = scatter_with_line(raw_df, "d_spc_pct", "d_ps_pct",
+                                   "Δ% Sales/CIF (QoQ, %)", "Δ% Purchase Sales (QoQ, %)")
+    if ch_raw_spc is not None:
+        st.altair_chart(ch_raw_spc, use_container_width=True)
+    else:
+        st.info("Not enough data to plot Δ%PS vs Δ%Sales/CIF.")
+
+# Row 2: RESIDUAL growth (what OLS actually fits)
+st.markdown("**Residual growth (QoQ %) vs Drivers — what the regression fits**")
+colE1, colE2 = st.columns(2)
+with colE1:
+    ch_resid_cif = scatter_with_line(resid_df, "d_cif_pct", "r_ps_pct",
+                                     "Δ% CIF (QoQ, %)", "Residual Δ% Purchase Sales (QoQ, %)")
+    if ch_resid_cif is not None:
+        st.altair_chart(ch_resid_cif, use_container_width=True)
+    else:
+        st.info("Not enough data to plot residual Δ%PS vs Δ%CIF.")
+with colE2:
+    ch_resid_spc = scatter_with_line(resid_df, "d_spc_pct", "r_ps_pct",
+                                     "Δ% Sales/CIF (QoQ, %)", "Residual Δ% Purchase Sales (QoQ, %)")
+    if ch_resid_spc is not None:
+        st.altair_chart(ch_resid_spc, use_container_width=True)
+    else:
+        st.info("Not enough data to plot residual Δ%PS vs Δ%Sales/CIF.")
+
+# =========================
+# TABLES — concise delta tables
 # =========================
 def tidy_sort_percent(dfp: pd.DataFrame, cols_pct: List[str]) -> pd.DataFrame:
     if dfp.empty: return dfp
@@ -641,3 +733,4 @@ if not proj_C.empty:
     st.dataframe(show_C, use_container_width=True)
 else:
     st.info("No projections to show for Method C.")
+``
