@@ -3,10 +3,10 @@
 # • A: Baseline & drivers = AVERAGE of all historical same‑quarter QoQ factors (fixed)
 # • B: Baseline & drivers = LATEST same‑quarter QoQ factor (carry‑forward)
 # • C: Baseline & drivers = TRUE ROLLING same‑quarter QoQ average using last K entries (history + forecasted)
-# • Coefficients (α, β_CIF, β_SPC) are pooled across banks on residual PS growth vs an expanding same‑quarter baseline
+# • Coefficients (α, β_CIF, β_SPC) pooled across banks on residual PS growth vs an expanding same‑quarter baseline
 # • Scenario Shift (±ppt) adds to PS growth each projected quarter
-# • Header auto‑mapping is enabled for your CCAP column names
-# • Long tables below charts are removed; optional CSV downloads provided
+# • Header auto‑mapping for your CCAP column names (QUARTER, BANK, Purchase Sales (in Bn), Cards in Force (in Bn), Sales / CIF ('000))
+# • Fix: charts use explicit if/else to prevent stray DeltaGenerator blocks being printed
 
 import re
 from typing import Dict, List, Tuple
@@ -19,6 +19,8 @@ import streamlit as st
 # =========================
 # CONFIG
 # =========================
+st.set_page_config(page_title="CCAP — Methods A/B/C (PS baselines + CIF/SPC uplift)", layout="wide")
+
 RAW_URL = "https://raw.githubusercontent.com/vincentlascano000/ccap_data/main/CCAP_DATA.csv"
 TARGET_END = pd.Period("2028Q4", freq="Q")  # inclusive
 BANK_ORDER_PREF = ["UB", "BDO", "BPI", "SECBANK", "MB", "RCBC"]
@@ -95,7 +97,7 @@ def to_numeric(s: pd.Series) -> pd.Series:
         return pd.to_numeric(s, errors="coerce")
     s2 = s.astype(str).str.replace(",", "", regex=False).str.strip()
     is_pct = s2.str.contains("%", regex=False, na=False)
-    s2 = s2.replace("%", "", regex=False)
+    s2 = s2.str.replace("%", "", regex=False)
     out = pd.to_numeric(s2, errors="coerce")
     return pd.Series(np.where(is_pct, out/100.0, out), index=s.index)
 
@@ -134,7 +136,6 @@ def format_percent_cols(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
 # =========================
 # UI
 # =========================
-st.set_page_config(page_title="CCAP — Methods A/B/C (PS baselines + CIF/SPC uplift)", layout="wide")
 st.title("CCAP — PS Baselines with CIF & Sales/CIF Uplift (Methods A, B & C)")
 st.caption(f"Forecast end: **{str(TARGET_END)}**")
 
@@ -365,7 +366,14 @@ def project_method_B(bank_df: pd.DataFrame, scenario_adj_prop: float) -> pd.Data
     return pd.DataFrame(rows)
 
 def project_method_C(bank_df: pd.DataFrame, scenario_adj_prop: float, K: int) -> pd.DataFrame:
-    """Method C: True rolling same‑quarter QoQ (history + forecasted) + uplift + scenario shift."""
+    """
+    Method C (True Rolling QoQ + uplift):
+      • Baseline PS growth uses a true rolling same‑quarter average:
+          average of the last K same‑quarter *realized* PS factors (history + forecasted‑to‑date).
+      • Driver growths (Δ%CIF, Δ%SPC) use the same rolling logic (average of last K same‑quarter factors).
+      • Total PS growth = g_base + uplift + scenario_adj_prop
+      • Append the *realized total PS factor* (PS_t / PS_{t-1}) into PS rolling pool.
+    """
     gb = bank_df.sort_values("quarter_dt").copy()
     last_dt  = gb["quarter_dt"].dropna().max()
     last_per = last_dt.to_period("Q")
@@ -386,15 +394,19 @@ def project_method_C(bank_df: pd.DataFrame, scenario_adj_prop: float, K: int) ->
 
     rows = []
     for h in range(1, H+1):
-        t = last_per + h; q = t.quarter
+        t = last_per + h
+        q = t.quarter
+
         prev_ps, prev_cif, prev_spc = level_ps, level_cif, level_spc
 
+        # PS baseline factor: average of last K *realized* PS factors (hist + fore)
         pool_ps_q = hist_ps[q] + fore_ps[q]
         use_ps = pool_ps_q[-K:] if len(pool_ps_q) >= K else pool_ps_q
         f_ps_base = float(np.mean(use_ps)) if use_ps else 1.0
         f_ps_base = f_ps_base if (np.isfinite(f_ps_base) and f_ps_base > 0) else 1.0
         g_base = f_ps_base - 1.0
 
+        # Drivers: same rolling logic on CIF/SPC factors
         pool_cif_q = hist_cif[q] + fore_cif[q]
         use_cif = pool_cif_q[-K:] if len(pool_cif_q) >= K else pool_cif_q
         f_cif = float(np.mean(use_cif)) if use_cif else 1.0
@@ -407,17 +419,23 @@ def project_method_C(bank_df: pd.DataFrame, scenario_adj_prop: float, K: int) ->
         f_spc = f_spc if (np.isfinite(f_spc) and f_spc > 0) else 1.0
         d_spc = f_spc - 1.0
 
+        # Uplift + Scenario
         uplift  = b_int + b_cif*d_cif + b_spc*d_spc
         g_total = g_base + uplift + scenario_adj_prop
 
+        # Evolve levels
         level_ps  *= (1.0 + g_total)
         level_cif *= (1.0 + d_cif)
         level_spc *= (1.0 + d_spc)
 
-        # Append baseline & driver factors (not total PS factor) for rolling pool
-        fore_ps[q].append(1.0 + g_base)
-        fore_cif[q].append(1.0 + d_cif)
-        fore_spc[q].append(1.0 + d_spc)
+        # Append REALIZED factors to rolling pools
+        f_ps_realized = (level_ps / prev_ps) if prev_ps else 1.0
+        if np.isfinite(f_ps_realized) and f_ps_realized > 0:
+            fore_ps[q].append(float(f_ps_realized))
+        if np.isfinite(1.0 + d_cif) and (1.0 + d_cif) > 0:
+            fore_cif[q].append(float(1.0 + d_cif))
+        if np.isfinite(1.0 + d_spc) and (1.0 + d_spc) > 0:
+            fore_spc[q].append(float(1.0 + d_spc))
 
         d_ps_pct  = (level_ps/prev_ps  - 1)*100 if prev_ps  else np.nan
         d_cif_pct = (level_cif/prev_cif - 1)*100 if prev_cif else np.nan
@@ -464,7 +482,7 @@ for dfp in [proj_A, proj_B, proj_C]:
             dfp[col] = dfp[col].round(int(round_dec))
 
 # =========================
-# COEFFICIENTS PANEL (keep)
+# COEFFICIENTS PANEL
 # =========================
 with st.expander("Coefficients used for uplift (pooled, residualized vs PS baseline)", expanded=True):
     st.markdown(
@@ -479,7 +497,7 @@ with st.expander("Coefficients used for uplift (pooled, residualized vs PS basel
     )
 
 # =========================
-# CHARTS — A/B/C overlays
+# CHARTS — A/B/C overlays (explicit if/else to avoid stray DeltaGenerator repr)
 # =========================
 color_scale = alt.Scale(scheme='tableau10')
 
@@ -552,27 +570,74 @@ col1, col2, col3 = st.columns(3)
 with col1:
     st.subheader("Method A — Avg same‑quarter QoQ + uplift")
     chA = chart_method("Method A (Avg QoQ + uplift)", metric_code)
-    st.altair_chart(chA, use_container_width=True) if chA else st.info("No projections for Method A.")
+    if chA is not None:
+        st.altair_chart(chA, use_container_width=True)
+    else:
+        st.info("No projections for Method A.")
 with col2:
     st.subheader("Method B — Latest same‑quarter QoQ + uplift")
     chB = chart_method("Method B (Latest QoQ + uplift)", metric_code)
-    st.altair_chart(chB, use_container_width=True) if chB else st.info("No projections for Method B.")
+    if chB is not None:
+        st.altair_chart(chB, use_container_width=True)
+    else:
+        st.info("No projections for Method B.")
 with col3:
     st.subheader("Method C — True Rolling same‑quarter QoQ + uplift")
     chC = chart_method("Method C (True Rolling QoQ + uplift)", metric_code)
-    st.altair_chart(chC, use_container_width=True) if chC else st.info("No projections for Method C.")
+    if chC is not None:
+        st.altair_chart(chC, use_container_width=True)
+    else:
+        st.info("No projections for Method C.")
 
 # =========================
-# OPTIONAL: CSV DOWNLOADS (no long tables rendered)
+# TABLES — concise delta tables (kept)
 # =========================
-st.subheader("Downloads (optional)")
-colD1, colD2, colD3 = st.columns(3)
-with colD1:
-    if not proj_A.empty:
-        st.download_button("Download Method A CSV", data=proj_A.to_csv(index=False), file_name="proj_method_A.csv", mime="text/csv")
-with colD2:
-    if not proj_B.empty:
-        st.download_button("Download Method B CSV", data=proj_B.to_csv(index=False), file_name="proj_method_B.csv", mime="text/csv")
-with colD3:
-    if not proj_C.empty:
-        st.download_button("Download Method C CSV", data=proj_C.to_csv(index=False), file_name="proj_method_C.csv", mime="text/csv")
+def tidy_sort_percent(dfp: pd.DataFrame, cols_pct: List[str]) -> pd.DataFrame:
+    if dfp.empty: return dfp
+    bank_order_map = {b: i for i, b in enumerate(BANK_ORDER_PREF)}
+    dfp["_b_sort"] = dfp["bank"].map(lambda x: bank_order_map.get(x, 999))
+    dfp["_q_sort"] = dfp["quarter"].apply(lambda q: (int(q[:4]) * 4) + int(q[-1]))
+    dfp = dfp.sort_values(["_q_sort","_b_sort","bank"]).drop(columns=["_q_sort","_b_sort"])
+    return format_percent_cols(dfp, cols_pct)
+
+st.subheader("Delta Table — Method A")
+if not proj_A.empty:
+    colsA = ["quarter","bank",
+             "projected_purchase_sales_bn","projected_cif_bn","projected_sales_per_cif_000",
+             "delta_purchase_sales_pct","delta_cif_pct","delta_sales_per_cif_000_pct",
+             "ps_uplift_pp","ps_uplift_multiplier","scenario_shift_pp"]
+    show_A = tidy_sort_percent(proj_A[colsA], ["delta_purchase_sales_pct","delta_cif_pct","delta_sales_per_cif_000_pct"])
+    show_A["ps_uplift_pp"]         = show_A["ps_uplift_pp"].apply(lambda x: f"{x:.2f} pp" if pd.notna(x) else None)
+    show_A["ps_uplift_multiplier"] = show_A["ps_uplift_multiplier"].apply(lambda x: f"{x:.4f} ×" if pd.notna(x) else None)
+    show_A["scenario_shift_pp"]    = show_A["scenario_shift_pp"].apply(lambda x: f"{x:.2f} pp" if pd.notna(x) else None)
+    st.dataframe(show_A, use_container_width=True)
+else:
+    st.info("No projections to show for Method A.")
+
+st.subheader("Delta Table — Method B")
+if not proj_B.empty:
+    colsB = ["quarter","bank",
+             "projected_purchase_sales_bn","projected_cif_bn","projected_sales_per_cif_000",
+             "delta_purchase_sales_pct","delta_cif_pct","delta_sales_per_cif_000_pct",
+             "ps_uplift_pp","ps_uplift_multiplier","scenario_shift_pp"]
+    show_B = tidy_sort_percent(proj_B[colsB], ["delta_purchase_sales_pct","delta_cif_pct","delta_sales_per_cif_000_pct"])
+    show_B["ps_uplift_pp"]         = show_B["ps_uplift_pp"].apply(lambda x: f"{x:.2f} pp" if pd.notna(x) else None)
+    show_B["ps_uplift_multiplier"] = show_B["ps_uplift_multiplier"].apply(lambda x: f"{x:.4f} ×" if pd.notna(x) else None)
+    show_B["scenario_shift_pp"]    = show_B["scenario_shift_pp"].apply(lambda x: f"{x:.2f} pp" if pd.notna(x) else None)
+    st.dataframe(show_B, use_container_width=True)
+else:
+    st.info("No projections to show for Method B.")
+
+st.subheader("Delta Table — Method C")
+if not proj_C.empty:
+    colsC = ["quarter","bank",
+             "projected_purchase_sales_bn","projected_cif_bn","projected_sales_per_cif_000",
+             "delta_purchase_sales_pct","delta_cif_pct","delta_sales_per_cif_000_pct",
+             "ps_uplift_pp","ps_uplift_multiplier","scenario_shift_pp"]
+    show_C = tidy_sort_percent(proj_C[colsC], ["delta_purchase_sales_pct","delta_cif_pct","delta_sales_per_cif_000_pct"])
+    show_C["ps_uplift_pp"]         = show_C["ps_uplift_pp"].apply(lambda x: f"{x:.2f} pp" if pd.notna(x) else None)
+    show_C["ps_uplift_multiplier"] = show_C["ps_uplift_multiplier"].apply(lambda x: f"{x:.4f} ×" if pd.notna(x) else None)
+    show_C["scenario_shift_pp"]    = show_C["scenario_shift_pp"].apply(lambda x: f"{x:.2f} pp" if pd.notna(x) else None)
+    st.dataframe(show_C, use_container_width=True)
+else:
+    st.info("No projections to show for Method C.")
