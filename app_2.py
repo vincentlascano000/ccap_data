@@ -1,13 +1,12 @@
 # app.py
 # CCAP — Methods A/B/C: PS baselines + CIF & Sales/CIF uplift + Scenario Shift
-# • A: Baseline & drivers = AVERAGE of all historical same‑quarter QoQ factors (fixed, history‑only)
+# • A: Baseline & drivers = AVERAGE of all historical same‑quarter QoQ factors (fixed)
 # • B: Baseline & drivers = LATEST same‑quarter QoQ factor (carry‑forward)
-# • C: Baseline & drivers = TRUE ROLLING same‑quarter QoQ using last K entries (history + forecasted)
-#     (True rolling appends the *realized PS factor* so it diverges from Method A.)
+# • C: Baseline & drivers = TRUE ROLLING same‑quarter QoQ average using last K entries (history + forecasted)
 # • Coefficients (α, β_CIF, β_SPC) pooled across banks on residual PS growth vs an expanding same‑quarter baseline
 # • Scenario Shift (±ppt) adds to PS growth each projected quarter
-# • Header auto‑mapping for CCAP column names (QUARTER, BANK, Purchase Sales (in Bn), Cards in Force (in Bn), Sales / CIF ('000))
-# • Delta tables REMOVED to keep app short; ADDED Delta Charts with historical + projected % changes
+# • Header auto‑mapping for your CCAP column names (QUARTER, BANK, Purchase Sales (in Bn), Cards in Force (in Bn), Sales / CIF ('000))
+# • Fix: charts use explicit if/else to prevent stray DeltaGenerator blocks being printed
 
 import re
 from typing import Dict, List, Tuple
@@ -97,9 +96,10 @@ def to_numeric(s: pd.Series) -> pd.Series:
     if pd.api.types.is_numeric_dtype(s):
         return pd.to_numeric(s, errors="coerce")
     s2 = s.astype(str).str.replace(",", "", regex=False).str.strip()
+    is_pct = s2.str.contains("%", regex=False, na=False)
     s2 = s2.str.replace("%", "", regex=False)
     out = pd.to_numeric(s2, errors="coerce")
-    return out
+    return pd.Series(np.where(is_pct, out/100.0, out), index=s.index)
 
 def qoq_factors_by_quarter(series: pd.Series, periods: pd.Series) -> Dict[int, List[float]]:
     """Dict q -> list of QoQ factors f = X_t / X_{t-1}, grouped by quarter-of-year of t."""
@@ -108,9 +108,8 @@ def qoq_factors_by_quarter(series: pd.Series, periods: pd.Series) -> Dict[int, L
     f = (s / s.shift(1)).dropna()
     out = {1: [], 2: [], 3: [], 4: []}
     for p, val in f.items():
-        v = float(val)
-        if np.isfinite(v) and v > 0:
-            out[p.quarter].append(v)
+        if np.isfinite(val) and val > 0:
+            out[p.quarter].append(float(val))
     return out
 
 def latest_same_quarter_qoq(series: pd.Series, periods: pd.Series) -> Dict[int, float]:
@@ -126,6 +125,13 @@ def latest_same_quarter_qoq(series: pd.Series, periods: pd.Series) -> Dict[int, 
         if not np.isfinite(d[q]) or d[q] <= 0:
             d[q] = 1.0
     return d
+
+def format_percent_cols(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
+    out = df.copy()
+    for c in cols:
+        if c in out.columns:
+            out[c] = out[c].apply(lambda x: (f"{x:.2f}%" if pd.notna(x) else None))
+    return out
 
 # =========================
 # UI
@@ -192,11 +198,6 @@ if not banks_pick:
     st.info("Select at least one bank.")
     st.stop()
 
-panel_selected = panel[panel["bank"].isin(banks_pick)].copy()
-if panel_selected.empty:
-    st.warning("No rows for the selected bank(s).")
-    st.stop()
-
 # =========================
 # COEFFICIENT ESTIMATION — pooled on residual PS growth vs expanding same‑quarter baseline
 # =========================
@@ -248,7 +249,7 @@ def fit_uplift_coefs(panel_bank: pd.DataFrame) -> Tuple[float,float,float,pd.Dat
     intercept, b_cif, b_spc = float(beta[0]), float(beta[1]), float(beta[2])
     return b_cif, b_spc, intercept, fit
 
-b_cif, b_spc, b_int, fit_df = fit_uplift_coefs(panel_selected)
+b_cif, b_spc, b_int, fit_df = fit_uplift_coefs(panel[panel["bank"].isin(banks_pick)])
 
 # =========================
 # PROJECTIONS: Methods A/B/C
@@ -367,9 +368,11 @@ def project_method_B(bank_df: pd.DataFrame, scenario_adj_prop: float) -> pd.Data
 def project_method_C(bank_df: pd.DataFrame, scenario_adj_prop: float, K: int) -> pd.DataFrame:
     """
     Method C (True Rolling QoQ + uplift):
-      • Baseline PS growth = average of last K same‑quarter *realized* PS factors (history + forecasted‑to‑date).
-      • Driver growths (Δ%CIF, Δ%SPC) = average of last K same‑quarter factors (history + forecasted).
-      • Append the *realized total PS factor* (PS_t / PS_{t-1}) into PS rolling pool so next same‑quarter adapts.
+      • Baseline PS growth uses a true rolling same‑quarter average:
+          average of the last K same‑quarter *realized* PS factors (history + forecasted‑to‑date).
+      • Driver growths (Δ%CIF, Δ%SPC) use the same rolling logic (average of last K same‑quarter factors).
+      • Total PS growth = g_base + uplift + scenario_adj_prop
+      • Append the *realized total PS factor* (PS_t / PS_{t-1}) into PS rolling pool.
     """
     gb = bank_df.sort_values("quarter_dt").copy()
     last_dt  = gb["quarter_dt"].dropna().max()
@@ -457,7 +460,7 @@ def project_method_C(bank_df: pd.DataFrame, scenario_adj_prop: float, K: int) ->
 # =========================
 proj_A_frames, proj_B_frames, proj_C_frames, hist_frames = [], [], [], []
 for b in banks_pick:
-    gb = panel_selected[panel_selected["bank"] == b][["bank","quarter_dt","purchase_sales_bn","cards_in_force_bn","sales_per_cif_000"]]
+    gb = panel[panel["bank"] == b][["bank","quarter_dt","purchase_sales_bn","cards_in_force_bn","sales_per_cif_000"]]
     if gb.shape[0] < 3:
         continue
     hist_frames.append(gb.assign(method="Actual"))
@@ -494,20 +497,19 @@ with st.expander("Coefficients used for uplift (pooled, residualized vs PS basel
     )
 
 # =========================
-# CHARTS — A/B/C overlays (levels)
+# CHARTS — A/B/C overlays (explicit if/else to avoid stray DeltaGenerator repr)
 # =========================
 color_scale = alt.Scale(scheme='tableau10')
 
-def chart_levels(method_name: str, metric_code: str):
+def chart_method(method_name: str, metric_code: str):
     metric_label = FRIENDLY.get(metric_code, metric_code)
     overlays = []
 
     # Actual
-    hist_all = pd.concat(hist_frames, ignore_index=True) if hist_frames else pd.DataFrame()
-    if not hist_all.empty and metric_code in hist_all.columns:
-        actual = hist_all[["bank","quarter_dt",metric_code]].dropna().copy()
-        actual = actual.rename(columns={metric_code:"value"}).assign(scenario="Actual")
-        overlays.append(actual[["bank","quarter_dt","value","scenario"]])
+    hist_all = pd.concat(hist_frames, ignore_index=True)
+    actual = hist_all[["bank","quarter_dt",metric_code]].dropna().copy()
+    actual = actual.rename(columns={metric_code:"value"}).assign(scenario="Actual")
+    overlays.append(actual[["bank","quarter_dt","value","scenario"]])
 
     # Projections
     mapping = {
@@ -516,8 +518,7 @@ def chart_levels(method_name: str, metric_code: str):
         "Method C (True Rolling QoQ + uplift)":  proj_C,
     }
     dfp = mapping.get(method_name, pd.DataFrame())
-    if dfp.empty:
-        return None
+    if dfp.empty: return None
 
     rename_map = {
         "projected_cif_bn":"cards_in_force_bn",
@@ -529,27 +530,22 @@ def chart_levels(method_name: str, metric_code: str):
     use = use[["bank","quarter_dt", metric_code, "method"]].rename(columns={metric_code:"value","method":"scenario"})
     overlays.append(use)
 
-    overlay = pd.concat(overlays, ignore_index=True) if overlays else pd.DataFrame()
-    if overlay.empty:
-        return None
+    overlay = pd.concat(overlays, ignore_index=True)
 
-    actual_layer = None
-    if "Actual" in overlay["scenario"].unique():
-        actual_layer = (
-            alt.Chart(overlay).transform_filter(alt.datum.scenario == "Actual")
-              .mark_line(point=True, strokeWidth=2)
-              .encode(
-                  x=alt.X("quarter_dt:T", title="Quarter"),
-                  y=alt.Y("value:Q", title=metric_label),
-                  color=alt.Color("bank:N", title="Bank", sort=banks_pick, scale=color_scale),
-                  tooltip=[alt.Tooltip("bank:N"),
-                           alt.Tooltip("quarter_dt:T", title="Quarter"),
-                           alt.Tooltip("value:Q", title=metric_label, format=",.2f"),
-                           alt.Tooltip("scenario:N")]
-              ).properties(height=360)
-        )
-
-    proj_layer = (
+    actual_line = (
+        alt.Chart(overlay).transform_filter(alt.datum.scenario == "Actual")
+          .mark_line(point=True, strokeWidth=2)
+          .encode(
+              x=alt.X("quarter_dt:T", title="Quarter"),
+              y=alt.Y("value:Q", title=metric_label),
+              color=alt.Color("bank:N", title="Bank", sort=banks_pick, scale=color_scale),
+              tooltip=[alt.Tooltip("bank:N"),
+                       alt.Tooltip("quarter_dt:T", title="Quarter"),
+                       alt.Tooltip("value:Q", title=metric_label, format=",.2f"),
+                       alt.Tooltip("scenario:N")]
+          ).properties(height=360)
+    )
+    proj_line = (
         alt.Chart(overlay).transform_filter(alt.datum.scenario != "Actual")
           .mark_line(point=False, strokeWidth=2, strokeDash=[6,4])
           .encode(
@@ -561,11 +557,10 @@ def chart_levels(method_name: str, metric_code: str):
                        alt.Tooltip("scenario:N")]
           ).properties(height=360)
     )
-
-    return proj_layer if actual_layer is None else alt.layer(actual_layer, proj_layer)
+    return alt.layer(actual_line, proj_line)
 
 metric_pick = st.selectbox(
-    "Metric to chart (levels)",
+    "Metric to chart",
     options=[FRIENDLY["purchase_sales_bn"], FRIENDLY["cards_in_force_bn"], FRIENDLY["sales_per_cif_000"]],
     index=0
 )
@@ -573,122 +568,76 @@ metric_code = {v:k for k,v in FRIENDLY.items()}[metric_pick]
 
 col1, col2, col3 = st.columns(3)
 with col1:
-    st.subheader("Method A — Levels")
-    chA = chart_levels("Method A (Avg QoQ + uplift)", metric_code)
-    if chA is not None: st.altair_chart(chA, use_container_width=True)
-    else: st.info("No projections for Method A.")
-with col2:
-    st.subheader("Method B — Levels")
-    chB = chart_levels("Method B (Latest QoQ + uplift)", metric_code)
-    if chB is not None: st.altair_chart(chB, use_container_width=True)
-    else: st.info("No projections for Method B.")
-with col3:
-    st.subheader("Method C — Levels")
-    chC = chart_levels("Method C (True Rolling QoQ + uplift)", metric_code)
-    if chC is not None: st.altair_chart(chC, use_container_width=True)
-    else: st.info("No projections for Method C.")
-
-# =========================
-# DELTA CHARTS — include historical + projected QoQ % changes
-# =========================
-st.markdown("### Delta Charts — QoQ % change (Historical + Projections)")
-
-def build_actual_deltas(panel_list: List[pd.DataFrame], metric_code: str) -> pd.DataFrame:
-    """Compute historical QoQ % deltas for the chosen metric from the actual panel (selected banks)."""
-    if not panel_list:
-        return pd.DataFrame()
-    hist_all = pd.concat(panel_list, ignore_index=True)
-    if metric_code not in hist_all.columns:
-        return pd.DataFrame()
-    out_frames = []
-    for b, gb in hist_all.groupby("bank"):
-        gb = gb.sort_values("quarter_dt")
-        # QoQ % as percentage (match projections that already use percentage units)
-        d = gb[[ "quarter_dt", metric_code ]].copy()
-        d["delta_pct"] = d[metric_code].pct_change() * 100.0
-        d["bank"] = b
-        d["scenario"] = "Actual Δ%"
-        out_frames.append(d[["bank","quarter_dt","delta_pct","scenario"]].dropna())
-    return pd.concat(out_frames, ignore_index=True) if out_frames else pd.DataFrame()
-
-def build_proj_deltas(proj_df: pd.DataFrame, metric_code: str, label_method: str) -> pd.DataFrame:
-    """Normalize projections delta columns to a common 'delta_pct' field as % (not proportion)."""
-    if proj_df.empty:
-        return pd.DataFrame()
-    rename_map = {
-        "projected_cif_bn": "cards_in_force_bn",
-        "projected_sales_per_cif_000": "sales_per_cif_000",
-        "projected_purchase_sales_bn": "purchase_sales_bn",
-    }
-    df = proj_df.rename(columns=rename_map).copy()
-    # choose the right delta column name
-    if metric_code == "purchase_sales_bn":
-        dcol = "delta_purchase_sales_pct"
-    elif metric_code == "cards_in_force_bn":
-        dcol = "delta_cif_pct"
+    st.subheader("Method A — Avg same‑quarter QoQ + uplift")
+    chA = chart_method("Method A (Avg QoQ + uplift)", metric_code)
+    if chA is not None:
+        st.altair_chart(chA, use_container_width=True)
     else:
-        dcol = "delta_sales_per_cif_000_pct"
-    if dcol not in df.columns:
-        return pd.DataFrame()
-    df["quarter_dt"] = df["quarter"].apply(lambda s: pd.Period(s, freq="Q").to_timestamp(how="end"))
-    out = df[["bank","quarter_dt", dcol]].rename(columns={dcol:"delta_pct"}).copy()
-    out["scenario"] = label_method
-    return out.dropna()
+        st.info("No projections for Method A.")
+with col2:
+    st.subheader("Method B — Latest same‑quarter QoQ + uplift")
+    chB = chart_method("Method B (Latest QoQ + uplift)", metric_code)
+    if chB is not None:
+        st.altair_chart(chB, use_container_width=True)
+    else:
+        st.info("No projections for Method B.")
+with col3:
+    st.subheader("Method C — True Rolling same‑quarter QoQ + uplift")
+    chC = chart_method("Method C (True Rolling QoQ + uplift)", metric_code)
+    if chC is not None:
+        st.altair_chart(chC, use_container_width=True)
+    else:
+        st.info("No projections for Method C.")
 
-def delta_chart(metric_code: str):
-    metric_label = FRIENDLY.get(metric_code, metric_code)
+# =========================
+# TABLES — concise delta tables (kept)
+# =========================
+def tidy_sort_percent(dfp: pd.DataFrame, cols_pct: List[str]) -> pd.DataFrame:
+    if dfp.empty: return dfp
+    bank_order_map = {b: i for i, b in enumerate(BANK_ORDER_PREF)}
+    dfp["_b_sort"] = dfp["bank"].map(lambda x: bank_order_map.get(x, 999))
+    dfp["_q_sort"] = dfp["quarter"].apply(lambda q: (int(q[:4]) * 4) + int(q[-1]))
+    dfp = dfp.sort_values(["_q_sort","_b_sort","bank"]).drop(columns=["_q_sort","_b_sort"])
+    return format_percent_cols(dfp, cols_pct)
 
-    # Build actual deltas
-    actual_deltas = build_actual_deltas(hist_frames, metric_code)
-
-    # Build projected deltas for each method
-    deltA = build_proj_deltas(proj_A, metric_code, "Method A Δ%")
-    deltB = build_proj_deltas(proj_B, metric_code, "Method B Δ%")
-    deltC = build_proj_deltas(proj_C, metric_code, "Method C Δ%")
-
-    overlay = pd.concat(
-        [x for x in [actual_deltas, deltA, deltB, deltC] if x is not None and not x.empty],
-        ignore_index=True
-    ) if (actual_deltas is not None) else pd.DataFrame()
-
-    if overlay.empty:
-        return None
-
-    # Line styles: solid for actual, dashed for projections
-    line_cond = alt.condition(
-        alt.FieldEqualPredicate(field='scenario', equal='Actual Δ%'),
-        alt.value([0]),  # solid
-        alt.value([6,4]) # dashed
-    )
-
-    chart = (
-        alt.Chart(overlay)
-        .mark_line(point=True, strokeWidth=2)
-        .encode(
-            x=alt.X("quarter_dt:T", title="Quarter"),
-            y=alt.Y("delta_pct:Q", title=f"QoQ Δ% — {metric_label}"),
-            color=alt.Color("bank:N", title="Bank", sort=banks_pick, scale=color_scale),
-            strokeDash=line_cond,
-            tooltip=[
-                alt.Tooltip("bank:N"),
-                alt.Tooltip("quarter_dt:T", title="Quarter"),
-                alt.Tooltip("scenario:N"),
-                alt.Tooltip("delta_pct:Q", title="QoQ Δ%", format=",.2f"),
-            ],
-        )
-        .properties(height=360)
-    )
-    return chart
-
-# Delta chart selector
-delta_pick = st.selectbox(
-    "Metric for Delta Charts (QoQ %)",
-    options=[FRIENDLY["purchase_sales_bn"], FRIENDLY["cards_in_force_bn"], FRIENDLY["sales_per_cif_000"]],
-    index=0
-)
-delta_metric_code = {v:k for k,v in FRIENDLY.items()}[delta_pick]
-dch = delta_chart(delta_metric_code)
-if dch is not None:
-    st.altair_chart(dch, use_container_width=True)
+st.subheader("Delta Table — Method A")
+if not proj_A.empty:
+    colsA = ["quarter","bank",
+             "projected_purchase_sales_bn","projected_cif_bn","projected_sales_per_cif_000",
+             "delta_purchase_sales_pct","delta_cif_pct","delta_sales_per_cif_000_pct",
+             "ps_uplift_pp","ps_uplift_multiplier","scenario_shift_pp"]
+    show_A = tidy_sort_percent(proj_A[colsA], ["delta_purchase_sales_pct","delta_cif_pct","delta_sales_per_cif_000_pct"])
+    show_A["ps_uplift_pp"]         = show_A["ps_uplift_pp"].apply(lambda x: f"{x:.2f} pp" if pd.notna(x) else None)
+    show_A["ps_uplift_multiplier"] = show_A["ps_uplift_multiplier"].apply(lambda x: f"{x:.4f} ×" if pd.notna(x) else None)
+    show_A["scenario_shift_pp"]    = show_A["scenario_shift_pp"].apply(lambda x: f"{x:.2f} pp" if pd.notna(x) else None)
+    st.dataframe(show_A, use_container_width=True)
 else:
-    st.info("No data available to plot QoQ % deltas for the selected metric and banks.")
+    st.info("No projections to show for Method A.")
+
+st.subheader("Delta Table — Method B")
+if not proj_B.empty:
+    colsB = ["quarter","bank",
+             "projected_purchase_sales_bn","projected_cif_bn","projected_sales_per_cif_000",
+             "delta_purchase_sales_pct","delta_cif_pct","delta_sales_per_cif_000_pct",
+             "ps_uplift_pp","ps_uplift_multiplier","scenario_shift_pp"]
+    show_B = tidy_sort_percent(proj_B[colsB], ["delta_purchase_sales_pct","delta_cif_pct","delta_sales_per_cif_000_pct"])
+    show_B["ps_uplift_pp"]         = show_B["ps_uplift_pp"].apply(lambda x: f"{x:.2f} pp" if pd.notna(x) else None)
+    show_B["ps_uplift_multiplier"] = show_B["ps_uplift_multiplier"].apply(lambda x: f"{x:.4f} ×" if pd.notna(x) else None)
+    show_B["scenario_shift_pp"]    = show_B["scenario_shift_pp"].apply(lambda x: f"{x:.2f} pp" if pd.notna(x) else None)
+    st.dataframe(show_B, use_container_width=True)
+else:
+    st.info("No projections to show for Method B.")
+
+st.subheader("Delta Table — Method C")
+if not proj_C.empty:
+    colsC = ["quarter","bank",
+             "projected_purchase_sales_bn","projected_cif_bn","projected_sales_per_cif_000",
+             "delta_purchase_sales_pct","delta_cif_pct","delta_sales_per_cif_000_pct",
+             "ps_uplift_pp","ps_uplift_multiplier","scenario_shift_pp"]
+    show_C = tidy_sort_percent(proj_C[colsC], ["delta_purchase_sales_pct","delta_cif_pct","delta_sales_per_cif_000_pct"])
+    show_C["ps_uplift_pp"]         = show_C["ps_uplift_pp"].apply(lambda x: f"{x:.2f} pp" if pd.notna(x) else None)
+    show_C["ps_uplift_multiplier"] = show_C["ps_uplift_multiplier"].apply(lambda x: f"{x:.4f} ×" if pd.notna(x) else None)
+    show_C["scenario_shift_pp"]    = show_C["scenario_shift_pp"].apply(lambda x: f"{x:.2f} pp" if pd.notna(x) else None)
+    st.dataframe(show_C, use_container_width=True)
+else:
+    st.info("No projections to show for Method C.")
