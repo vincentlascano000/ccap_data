@@ -1,5 +1,5 @@
 # app.py
-# CCAP — Methods A/B/C: PS baselines + CIF & Sales/CIF uplift + Scenario Shift + Coef Diagnostics
+# CCAP — Methods A/B/C: PS baselines + CIF & Sales/CIF uplift + Scenario Shift
 # • A: Baseline & drivers = AVERAGE of all historical same‑quarter QoQ factors (fixed, history‑only)
 # • B: Baseline & drivers = LATEST same‑quarter QoQ factor (carry‑forward)
 # • C: Baseline & drivers = TRUE ROLLING same‑quarter QoQ using last K entries (history + forecasted)
@@ -7,8 +7,7 @@
 # • Coefficients (α, β_CIF, β_SPC) pooled across banks on residual PS growth vs an expanding same‑quarter baseline
 # • Scenario Shift (±ppt) adds to PS growth each projected quarter
 # • Header auto‑mapping for CCAP column names (QUARTER, BANK, Purchase Sales (in Bn), Cards in Force (in Bn), Sales / CIF ('000))
-# • Coefficient Diagnostics — scatter + best‑fit lines (raw & residual views), computed from the selected panel (robust)
-# • Delta tables REMOVED for brevity
+# • Delta tables REMOVED to keep app short; ADDED Delta Charts with historical + projected % changes
 
 import re
 from typing import Dict, List, Tuple
@@ -250,70 +249,6 @@ def fit_uplift_coefs(panel_bank: pd.DataFrame) -> Tuple[float,float,float,pd.Dat
     return b_cif, b_spc, intercept, fit
 
 b_cif, b_spc, b_int, fit_df = fit_uplift_coefs(panel_selected)
-
-# =========================
-# COEFFICIENT DIAGNOSTICS FRAMES — BUILT FROM PANEL (robust)
-# =========================
-def make_coef_diag_frames_from_panel(panel_sel: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Build diagnostic frames directly from selected banks' panel.
-    Returns:
-      raw_df   : bank, quarter_dt, d_ps_pct, d_cif_pct, d_spc_pct
-      resid_df : bank, quarter_dt, r_ps_pct, d_cif_pct, d_spc_pct
-    """
-    if panel_sel is None or panel_sel.empty:
-        return pd.DataFrame(), pd.DataFrame()
-
-    g = panel_sel.sort_values(["bank", "quarter_dt"]).copy()
-    g["per"] = g["quarter_dt"].dt.to_period("Q")
-    g["qtr"] = g["per"].apply(lambda p: p.quarter)
-
-    # QoQ % changes (proportions)
-    g["d_ps"]  = g.groupby("bank")["purchase_sales_bn"].pct_change()
-    g["d_cif"] = g.groupby("bank")["cards_in_force_bn"].pct_change()
-    g["d_spc"] = g.groupby("bank")["sales_per_cif_000"].pct_change()
-
-    # Expanding same‑quarter baseline for PS growth (proportions)
-    base_g = []
-    for b, gb in g.groupby("bank"):
-        pools = {1: [], 2: [], 3: [], 4: []}
-        q_b   = gb["qtr"].to_numpy()
-        dps   = gb["d_ps"].to_numpy()
-        series = []
-        for i in range(len(gb)):
-            q = q_b[i]
-            pool = pools[q]
-            g_base = float(np.mean(pool)) if len(pool) > 0 else np.nan
-            series.append(g_base)
-            if pd.notna(dps[i]):
-                pools[q].append(dps[i])
-        base_g.append(pd.Series(series, index=gb.index))
-    g["g_base"] = pd.concat(base_g).sort_index()
-
-    # Residual growth
-    g["r_ps"] = g["d_ps"] - g["g_base"]
-
-    # RAW growths (% for display)
-    raw_df = g[["bank", "per", "d_ps", "d_cif", "d_spc"]].dropna().copy()
-    raw_df["quarter_dt"] = raw_df["per"].dt.to_timestamp()
-    raw_df["d_ps_pct"]  = pd.to_numeric(raw_df["d_ps"], errors="coerce")  * 100.0
-    raw_df["d_cif_pct"] = pd.to_numeric(raw_df["d_cif"], errors="coerce") * 100.0
-    raw_df["d_spc_pct"] = pd.to_numeric(raw_df["d_spc"], errors="coerce") * 100.0
-    raw_df = raw_df.dropna(subset=["d_ps_pct","d_cif_pct","d_spc_pct"])
-    raw_df = raw_df[["bank", "quarter_dt", "d_ps_pct", "d_cif_pct", "d_spc_pct"]]
-
-    # RESIDUAL view
-    resid_df = g[["bank", "per", "r_ps", "d_cif", "d_spc"]].dropna().copy()
-    resid_df["quarter_dt"] = resid_df["per"].dt.to_timestamp()
-    resid_df["r_ps_pct"]  = pd.to_numeric(resid_df["r_ps"], errors="coerce")  * 100.0
-    resid_df["d_cif_pct"] = pd.to_numeric(resid_df["d_cif"], errors="coerce") * 100.0
-    resid_df["d_spc_pct"] = pd.to_numeric(resid_df["d_spc"], errors="coerce") * 100.0
-    resid_df = resid_df.dropna(subset=["r_ps_pct","d_cif_pct","d_spc_pct"])
-    resid_df = resid_df[["bank", "quarter_dt", "r_ps_pct", "d_cif_pct", "d_spc_pct"]]
-
-    return raw_df, resid_df
-
-raw_df, resid_df = make_coef_diag_frames_from_panel(panel_selected)
 
 # =========================
 # PROJECTIONS: Methods A/B/C
@@ -559,11 +494,11 @@ with st.expander("Coefficients used for uplift (pooled, residualized vs PS basel
     )
 
 # =========================
-# CHARTS — A/B/C overlays (explicit if/else to avoid stray DeltaGenerator repr)
+# CHARTS — A/B/C overlays (levels)
 # =========================
 color_scale = alt.Scale(scheme='tableau10')
 
-def chart_method(method_name: str, metric_code: str):
+def chart_levels(method_name: str, metric_code: str):
     metric_label = FRIENDLY.get(metric_code, metric_code)
     overlays = []
 
@@ -581,7 +516,7 @@ def chart_method(method_name: str, metric_code: str):
         "Method C (True Rolling QoQ + uplift)":  proj_C,
     }
     dfp = mapping.get(method_name, pd.DataFrame())
-    if dfp.empty: 
+    if dfp.empty:
         return None
 
     rename_map = {
@@ -595,7 +530,7 @@ def chart_method(method_name: str, metric_code: str):
     overlays.append(use)
 
     overlay = pd.concat(overlays, ignore_index=True) if overlays else pd.DataFrame()
-    if overlay.empty: 
+    if overlay.empty:
         return None
 
     actual_layer = None
@@ -630,7 +565,7 @@ def chart_method(method_name: str, metric_code: str):
     return proj_layer if actual_layer is None else alt.layer(actual_layer, proj_layer)
 
 metric_pick = st.selectbox(
-    "Metric to chart",
+    "Metric to chart (levels)",
     options=[FRIENDLY["purchase_sales_bn"], FRIENDLY["cards_in_force_bn"], FRIENDLY["sales_per_cif_000"]],
     index=0
 )
@@ -638,101 +573,122 @@ metric_code = {v:k for k,v in FRIENDLY.items()}[metric_pick]
 
 col1, col2, col3 = st.columns(3)
 with col1:
-    st.subheader("Method A — Avg same‑quarter QoQ + uplift")
-    chA = chart_method("Method A (Avg QoQ + uplift)", metric_code)
-    if chA is not None:
-        st.altair_chart(chA, use_container_width=True)
-    else:
-        st.info("No projections for Method A.")
+    st.subheader("Method A — Levels")
+    chA = chart_levels("Method A (Avg QoQ + uplift)", metric_code)
+    if chA is not None: st.altair_chart(chA, use_container_width=True)
+    else: st.info("No projections for Method A.")
 with col2:
-    st.subheader("Method B — Latest same‑quarter QoQ + uplift")
-    chB = chart_method("Method B (Latest QoQ + uplift)", metric_code)
-    if chB is not None:
-        st.altair_chart(chB, use_container_width=True)
-    else:
-        st.info("No projections for Method B.")
+    st.subheader("Method B — Levels")
+    chB = chart_levels("Method B (Latest QoQ + uplift)", metric_code)
+    if chB is not None: st.altair_chart(chB, use_container_width=True)
+    else: st.info("No projections for Method B.")
 with col3:
-    st.subheader("Method C — True Rolling same‑quarter QoQ + uplift")
-    chC = chart_method("Method C (True Rolling QoQ + uplift)", metric_code)
-    if chC is not None:
-        st.altair_chart(chC, use_container_width=True)
+    st.subheader("Method C — Levels")
+    chC = chart_levels("Method C (True Rolling QoQ + uplift)", metric_code)
+    if chC is not None: st.altair_chart(chC, use_container_width=True)
+    else: st.info("No projections for Method C.")
+
+# =========================
+# DELTA CHARTS — include historical + projected QoQ % changes
+# =========================
+st.markdown("### Delta Charts — QoQ % change (Historical + Projections)")
+
+def build_actual_deltas(panel_list: List[pd.DataFrame], metric_code: str) -> pd.DataFrame:
+    """Compute historical QoQ % deltas for the chosen metric from the actual panel (selected banks)."""
+    if not panel_list:
+        return pd.DataFrame()
+    hist_all = pd.concat(panel_list, ignore_index=True)
+    if metric_code not in hist_all.columns:
+        return pd.DataFrame()
+    out_frames = []
+    for b, gb in hist_all.groupby("bank"):
+        gb = gb.sort_values("quarter_dt")
+        # QoQ % as percentage (match projections that already use percentage units)
+        d = gb[[ "quarter_dt", metric_code ]].copy()
+        d["delta_pct"] = d[metric_code].pct_change() * 100.0
+        d["bank"] = b
+        d["scenario"] = "Actual Δ%"
+        out_frames.append(d[["bank","quarter_dt","delta_pct","scenario"]].dropna())
+    return pd.concat(out_frames, ignore_index=True) if out_frames else pd.DataFrame()
+
+def build_proj_deltas(proj_df: pd.DataFrame, metric_code: str, label_method: str) -> pd.DataFrame:
+    """Normalize projections delta columns to a common 'delta_pct' field as % (not proportion)."""
+    if proj_df.empty:
+        return pd.DataFrame()
+    rename_map = {
+        "projected_cif_bn": "cards_in_force_bn",
+        "projected_sales_per_cif_000": "sales_per_cif_000",
+        "projected_purchase_sales_bn": "purchase_sales_bn",
+    }
+    df = proj_df.rename(columns=rename_map).copy()
+    # choose the right delta column name
+    if metric_code == "purchase_sales_bn":
+        dcol = "delta_purchase_sales_pct"
+    elif metric_code == "cards_in_force_bn":
+        dcol = "delta_cif_pct"
     else:
-        st.info("No projections for Method C.")
+        dcol = "delta_sales_per_cif_000_pct"
+    if dcol not in df.columns:
+        return pd.DataFrame()
+    df["quarter_dt"] = df["quarter"].apply(lambda s: pd.Period(s, freq="Q").to_timestamp(how="end"))
+    out = df[["bank","quarter_dt", dcol]].rename(columns={dcol:"delta_pct"}).copy()
+    out["scenario"] = label_method
+    return out.dropna()
 
-# =========================
-# COEFFICIENT DIAGNOSTICS — scatterplots with best‑fit lines
-# =========================
-st.subheader("Coefficient Diagnostics — Scatterplots with Best‑Fit Line")
+def delta_chart(metric_code: str):
+    metric_label = FRIENDLY.get(metric_code, metric_code)
 
-with st.expander("Diagnostics status (data availability)", expanded=False):
-    st.write(f"RAW points:      {len(raw_df)}")
-    st.write(f"RESIDUAL points: {len(resid_df)}")
-    if len(raw_df) == 0:
-        st.info("RAW view has no rows. Ensure selected banks have enough quarters for QoQ % changes.")
-    if len(resid_df) == 0:
-        st.info("RESIDUAL view has no rows. This can happen with short histories; try including more banks.")
+    # Build actual deltas
+    actual_deltas = build_actual_deltas(hist_frames, metric_code)
 
-def scatter_with_line(df: pd.DataFrame, x_col: str, y_col: str,
-                      x_title: str, y_title: str, color_scale=alt.Scale(scheme='tableau10')):
-    if df is None or df.empty:
+    # Build projected deltas for each method
+    deltA = build_proj_deltas(proj_A, metric_code, "Method A Δ%")
+    deltB = build_proj_deltas(proj_B, metric_code, "Method B Δ%")
+    deltC = build_proj_deltas(proj_C, metric_code, "Method C Δ%")
+
+    overlay = pd.concat(
+        [x for x in [actual_deltas, deltA, deltB, deltC] if x is not None and not x.empty],
+        ignore_index=True
+    ) if (actual_deltas is not None) else pd.DataFrame()
+
+    if overlay.empty:
         return None
-    # If there are very few points or zero variance on X/Y, skip regression line (show scatter only)
-    add_line = False
-    if len(df) >= 3 and df[x_col].std(ddof=0) > 0 and df[y_col].std(ddof=0) > 0:
-        add_line = True
 
-    base = alt.Chart(df).mark_circle(size=60, opacity=0.6).encode(
-        x=alt.X(f"{x_col}:Q", title=x_title),
-        y=alt.Y(f"{y_col}:Q", title=y_title),
-        color=alt.Color("bank:N", legend=None, scale=color_scale),
-        tooltip=[
-            alt.Tooltip("bank:N"),
-            alt.Tooltip("quarter_dt:T", title="Quarter"),
-            alt.Tooltip(x_col, title=x_title, format=",.2f"),
-            alt.Tooltip(y_col, title=y_title, format=",.2f"),
-        ]
-    ).properties(height=320)
+    # Line styles: solid for actual, dashed for projections
+    line_cond = alt.condition(
+        alt.FieldEqualPredicate(field='scenario', equal='Actual Δ%'),
+        alt.value([0]),  # solid
+        alt.value([6,4]) # dashed
+    )
 
-    if add_line:
-        line = alt.Chart(df).transform_regression(x_col, y_col).mark_line(
-            color="#e31a1c", strokeWidth=2
+    chart = (
+        alt.Chart(overlay)
+        .mark_line(point=True, strokeWidth=2)
+        .encode(
+            x=alt.X("quarter_dt:T", title="Quarter"),
+            y=alt.Y("delta_pct:Q", title=f"QoQ Δ% — {metric_label}"),
+            color=alt.Color("bank:N", title="Bank", sort=banks_pick, scale=color_scale),
+            strokeDash=line_cond,
+            tooltip=[
+                alt.Tooltip("bank:N"),
+                alt.Tooltip("quarter_dt:T", title="Quarter"),
+                alt.Tooltip("scenario:N"),
+                alt.Tooltip("delta_pct:Q", title="QoQ Δ%", format=",.2f"),
+            ],
         )
-        return (base + line)
-    else:
-        return base
+        .properties(height=360)
+    )
+    return chart
 
-# Row 1: RAW growths (intuitive view)
-st.markdown("**Raw growths (QoQ %): Δ% Purchase Sales vs Drivers**")
-colR1, colR2 = st.columns(2)
-with colR1:
-    ch_raw_cif = scatter_with_line(raw_df, "d_cif_pct", "d_ps_pct",
-                                   "Δ% CIF (QoQ, %)", "Δ% Purchase Sales (QoQ, %)")
-    if ch_raw_cif is not None:
-        st.altair_chart(ch_raw_cif, use_container_width=True)
-    else:
-        st.info("Not enough data to plot Δ%PS vs Δ%CIF.")
-with colR2:
-    ch_raw_spc = scatter_with_line(raw_df, "d_spc_pct", "d_ps_pct",
-                                   "Δ% Sales/CIF (QoQ, %)", "Δ% Purchase Sales (QoQ, %)")
-    if ch_raw_spc is not None:
-        st.altair_chart(ch_raw_spc, use_container_width=True)
-    else:
-        st.info("Not enough data to plot Δ%PS vs Δ%Sales/CIF.")
-
-# Row 2: RESIDUAL growth (what OLS actually fits)
-st.markdown("**Residual growth (QoQ %) vs Drivers — what the regression fits**")
-colE1, colE2 = st.columns(2)
-with colE1:
-    ch_resid_cif = scatter_with_line(resid_df, "d_cif_pct", "r_ps_pct",
-                                     "Δ% CIF (QoQ, %)", "Residual Δ% Purchase Sales (QoQ, %)")
-    if ch_resid_cif is not None:
-        st.altair_chart(ch_resid_cif, use_container_width=True)
-    else:
-        st.info("Not enough data to plot residual Δ%PS vs Δ%CIF.")
-with colE2:
-    ch_resid_spc = scatter_with_line(resid_df, "d_spc_pct", "r_ps_pct",
-                                     "Δ% Sales/CIF (QoQ, %)", "Residual Δ% Purchase Sales (QoQ, %)")
-    if ch_resid_spc is not None:
-        st.altair_chart(ch_resid_spc, use_container_width=True)
-    else:
-        st.info("Not enough data to plot residual Δ%PS vs Δ%Sales/CIF.")
+# Delta chart selector
+delta_pick = st.selectbox(
+    "Metric for Delta Charts (QoQ %)",
+    options=[FRIENDLY["purchase_sales_bn"], FRIENDLY["cards_in_force_bn"], FRIENDLY["sales_per_cif_000"]],
+    index=0
+)
+delta_metric_code = {v:k for k,v in FRIENDLY.items()}[delta_pick]
+dch = delta_chart(delta_metric_code)
+if dch is not None:
+    st.altair_chart(dch, use_container_width=True)
+else:
+    st.info("No data available to plot QoQ % deltas for the selected metric and banks.")
