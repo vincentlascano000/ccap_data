@@ -1,10 +1,9 @@
 # app.py
-# CCAP — Methods A/B + NEW Method C (Baseline × Driver-Uplift)
-# Method A: Rolling seasonal QoQ average (expanding window by quarter-of-year) for CIF & SPC and PS = scale*CIF*SPC
-# Method B: Latest same-quarter QoQ carry-forward for CIF & SPC and PS = scale*CIF*SPC
-# Method C: PS baseline (rolling QoQ seasonal) + uplift from Δ%CIF and Δ%Balances (pooled OLS on growth)
-# - Tables include QoQ % deltas (as percent strings)
-# - Charts: one per method for a chosen metric + Method C driver scatter plots with best-fit lines
+# CCAP — Two methods (PS baseline from PS history) + driver uplift via CIF & Sales/CIF (NO Balances)
+# Method A: PS baseline = Rolling QoQ seasonal avg; Drivers (Δ%CIF, Δ%SPC) = Rolling QoQ seasonal avg
+# Method B: PS baseline = Latest same-quarter QoQ; Drivers (Δ%CIF, Δ%SPC) = Latest same-quarter QoQ
+# Coefficients (intercept, β_CIF, β_SPC) are estimated once (pooled) on residual PS growth.
+# Output: charts (A & B) + tables (+ QoQ % delta formatting) + coefficient panel + driver scatter with best-fit lines.
 
 import re
 from typing import Dict, List, Tuple
@@ -32,9 +31,6 @@ COLUMN_SYNONYMS: Dict[str, List[str]] = {
     "cards_in_force_bn": [
         "cards_in_force_bn","cards_in_force","cif (bn)","cif","cif_in_bn","cif_bn","cards","c.i.f."
     ],
-    "balances_bn": [
-        "balances_bn","balances","balance (bn)","balances (in bn)","total_balance_bn","balances_bil","balances_billion"
-    ],
     "sales_per_cif_000": [
         "sales_per_cif_000","sales_per_cif","sales per cif (000)","sales/cif (000)","sales_cif"
     ],
@@ -43,7 +39,6 @@ COLUMN_SYNONYMS: Dict[str, List[str]] = {
 FRIENDLY = {
     "purchase_sales_bn": "Purchase Sales (Bn)",
     "cards_in_force_bn": "Cards in Force (Bn)",
-    "balances_bn": "Balances (Bn)",
     "sales_per_cif_000": "Sales / CIF ('000)",
 }
 
@@ -167,18 +162,18 @@ def robust_mean(vals: List[float], median=False) -> float:
 # =========================
 # UI
 # =========================
-st.set_page_config(page_title="CCAP — QoQ Methods + Method C", layout="wide")
-st.title("CCAP — CIF × Sales/CIF and Baseline×Uplift: Methods A/B/C")
+st.set_page_config(page_title="CCAP — Two PS Baselines + CIF/SPC uplift", layout="wide")
+st.title("CCAP — PS Baselines with CIF & Sales/CIF Uplift (Methods A & B)")
 st.caption(f"Forecast end: **{str(TARGET_END)}**")
 
-st.sidebar.header("Data & Output")
+st.sidebar.header("General")
 round_dec = st.sidebar.selectbox("Round decimals (levels)", options=[0,1,2], index=1)
 
 st.sidebar.header("Method A (Rolling QoQ)")
 base_window_years = st.sidebar.slider("Initial lookback (years) per quarter", 1, 4, 2, 1)
 use_median_A = st.sidebar.checkbox("Use median (instead of mean) for A", value=False)
 
-st.sidebar.header("Method C (Baseline×Uplift)")
+st.sidebar.header("Uplift cap")
 uplift_cap_pct_pts = st.sidebar.slider("Cap uplift contribution (±ppt)", 2.0, 15.0, 8.0, 1.0)
 
 # =========================
@@ -207,7 +202,7 @@ if "bank" not in df.columns:
     st.write("Detected columns:", list(df.columns))
     st.stop()
 
-# Column mapping for CIF/SPC/Balances/Purchase Sales
+# Column mapping for PS/CIF/SPC
 st.sidebar.header("Column mapping (if needed)")
 def ensure_col(name_key: str, label: str) -> str:
     if name_key in df.columns:
@@ -217,7 +212,6 @@ def ensure_col(name_key: str, label: str) -> str:
 
 cif_col = ensure_col("cards_in_force_bn", FRIENDLY["cards_in_force_bn"])
 spc_col = ensure_col("sales_per_cif_000", FRIENDLY["sales_per_cif_000"])
-bal_col = ensure_col("balances_bn", FRIENDLY["balances_bn"])
 if "purchase_sales_bn" not in df.columns:
     cands = candidate_cols(df, COLUMN_SYNONYMS["purchase_sales_bn"])
     if cands:
@@ -225,10 +219,10 @@ if "purchase_sales_bn" not in df.columns:
         df["purchase_sales_bn"] = df[sel]
 
 # Coerce numeric
-for c in [cif_col, spc_col, bal_col, "purchase_sales_bn"]:
+for c in [cif_col, spc_col, "purchase_sales_bn"]:
     df[c] = to_numeric(df[c])
 
-panel = (df[["bank","quarter_dt", cif_col, spc_col, bal_col, "purchase_sales_bn"]]
+panel = (df[["bank","quarter_dt", cif_col, spc_col, "purchase_sales_bn"]]
          .dropna(subset=["bank","quarter_dt"])
          .sort_values(["bank","quarter_dt"])
          .reset_index(drop=True))
@@ -242,113 +236,17 @@ if not banks_pick:
     st.stop()
 
 # =========================
-# METHOD B — Latest same-quarter QoQ (CIF & SPC → PS via identity)
-# =========================
-def project_latest_qoq_identity(bank_df: pd.DataFrame) -> pd.DataFrame:
-    g = bank_df.sort_values("quarter_dt").copy()
-    per = g["quarter_dt"].dt.to_period("Q")
-    last_dt  = g["quarter_dt"].dropna().max()
-    last_per = last_dt.to_period("Q")
-    H = (TARGET_END.year - last_per.year) * 4 + (TARGET_END.quarter - last_per.quarter)
-    if H <= 0:
-        return pd.DataFrame()
-
-    # splice scaling for PS identity
-    cif_last = float(g.iloc[-1][cif_col]); spc_last = float(g.iloc[-1][spc_col])
-    denom = cif_last * spc_last if (cif_last and spc_last) else None
-    scale = float(g.iloc[-1]["purchase_sales_bn"]) / denom if denom and denom != 0 else 1.0
-
-    latest_cif = latest_same_quarter_qoq(g[cif_col], g["quarter_dt"])
-    latest_spc = latest_same_quarter_qoq(g[spc_col], g["quarter_dt"])
-    level_cif, level_spc = cif_last, spc_last
-
-    rows = []
-    for h in range(1, H + 1):
-        t = last_per + h; q = t.quarter
-        prev_ps = scale * level_cif * level_spc
-        prev_cif, prev_spc = level_cif, level_spc
-
-        f_cif = latest_cif.get(q, 1.0); f_spc = latest_spc.get(q, 1.0)
-        level_cif *= f_cif; level_spc *= f_spc
-        level_ps = scale * level_cif * level_spc
-
-        d_cif = (level_cif/prev_cif - 1)*100 if prev_cif else np.nan
-        d_spc = (level_spc/prev_spc - 1)*100 if prev_spc else np.nan
-        d_ps  = (level_ps/prev_ps  - 1)*100 if prev_ps  else np.nan
-
-        rows.append({"quarter": str(t), "bank": g["bank"].iloc[0], "method": "Latest QoQ",
-                     "projected_cif_bn": level_cif,
-                     "projected_sales_per_cif_000": level_spc,
-                     "projected_purchase_sales_bn": level_ps,
-                     "delta_cif_pct": round(d_cif,2) if pd.notna(d_cif) else None,
-                     "delta_sales_per_cif_pct": round(d_spc,2) if pd.notna(d_spc) else None,
-                     "delta_purchase_sales_pct": round(d_ps,2) if pd.notna(d_ps) else None})
-    return pd.DataFrame(rows)
-
-# =========================
-# METHOD A — Rolling seasonal QoQ (CIF & SPC → PS via identity)
-# =========================
-def project_rolling_qoq_identity(bank_df: pd.DataFrame) -> pd.DataFrame:
-    g = bank_df.sort_values("quarter_dt").copy()
-    per = g["quarter_dt"].dt.to_period("Q")
-    last_dt  = g["quarter_dt"].dropna().max()
-    last_per = last_dt.to_period("Q")
-    H = (TARGET_END.year - last_per.year) * 4 + (TARGET_END.quarter - last_per.quarter)
-    if H <= 0: return pd.DataFrame()
-
-    # splice scaling
-    cif_last = float(g.iloc[-1][cif_col]); spc_last = float(g.iloc[-1][spc_col])
-    denom = cif_last * spc_last if (cif_last and spc_last) else None
-    scale = float(g.iloc[-1]["purchase_sales_bn"]) / denom if denom and denom != 0 else 1.0
-
-    hist_cif = qoq_factors_by_quarter(g[cif_col], g["quarter_dt"])
-    hist_spc = qoq_factors_by_quarter(g[spc_col], g["quarter_dt"])
-    fore_cif, fore_spc = {1:[],2:[],3:[],4:[]},{1:[],2:[],3:[],4:[]}
-    done_cnt = {1:0,2:0,3:0,4:0}
-
-    level_cif, level_spc = cif_last, spc_last
-    rows = []
-    for h in range(1, H+1):
-        t = last_per + h; q = t.quarter
-        prev_ps = scale * level_cif * level_spc
-        prev_cif, prev_spc = level_cif, level_spc
-
-        K = base_window_years + done_cnt[q]
-        pool_cif = hist_cif[q] + fore_cif[q]
-        pool_spc = hist_spc[q] + fore_spc[q]
-        f_cif = robust_mean(pool_cif[-K:] if len(pool_cif)>=K else pool_cif, median=use_median_A) if pool_cif else 1.0
-        f_spc = robust_mean(pool_spc[-K:] if len(pool_spc)>=K else pool_spc, median=use_median_A) if pool_spc else 1.0
-        f_cif = f_cif if (np.isfinite(f_cif) and f_cif>0) else 1.0
-        f_spc = f_spc if (np.isfinite(f_spc) and f_spc>0) else 1.0
-
-        level_cif*=f_cif; level_spc*=f_spc
-        fore_cif[q].append(f_cif); fore_spc[q].append(f_spc); done_cnt[q]+=1
-        level_ps = scale * level_cif * level_spc
-
-        d_cif = (level_cif/prev_cif - 1)*100 if prev_cif else np.nan
-        d_spc = (level_spc/prev_spc - 1)*100 if prev_spc else np.nan
-        d_ps  = (level_ps/prev_ps  - 1)*100 if prev_ps  else np.nan
-
-        rows.append({"quarter": str(t), "bank": g["bank"].iloc[0], "method": "Rolling Seasonal (QoQ avg)",
-                     "projected_cif_bn": level_cif,
-                     "projected_sales_per_cif_000": level_spc,
-                     "projected_purchase_sales_bn": level_ps,
-                     "delta_cif_pct": round(d_cif,2) if pd.notna(d_cif) else None,
-                     "delta_sales_per_cif_pct": round(d_spc,2) if pd.notna(d_spc) else None,
-                     "delta_purchase_sales_pct": round(d_ps,2) if pd.notna(d_ps) else None})
-    return pd.DataFrame(rows)
-
-# =========================
-# METHOD C — Baseline (PS) × Uplift (Δ%CIF, Δ%BAL)
+# COEFFICIENT ESTIMATION (pooled) — on residual growth vs PS rolling baseline
 # =========================
 def fit_uplift_coefs(panel_bank: pd.DataFrame, window_years: int = 2) -> Tuple[float,float,float,pd.DataFrame]:
     """
-    Estimate pooled OLS on PS growth vs Δ%CIF and Δ%BAL.
-    - Build historical QoQ % growth for PS, CIF, BAL.
-    - Build PS baseline growth per quarter as rolling QoQ avg of PS (using window_years, expanding per quarter).
-    - Residual growth r = g_ps - g_base.
-    - Pooled OLS: r ~ d_cif + d_bal (with intercept) via numpy lstsq.
-    Returns (beta_cif, beta_bal, intercept, fit_df for diagnostics/charting).
+    Estimate pooled OLS on residual PS growth vs Δ%CIF and Δ%SPC (Sales/CIF).
+    Steps:
+      - Compute QoQ % changes: d_ps, d_cif, d_spc
+      - Build PS baseline growth (rolling QoQ seasonal avg) g_base
+      - Residual r_ps = d_ps - g_base
+      - Fit: r_ps = a + b_cif*d_cif + b_spc*d_spc  (numpy lstsq)
+    Returns (b_cif, b_spc, intercept, fit_df for diagnostics)
     """
     g = panel_bank.sort_values(["bank","quarter_dt"]).copy()
     g["per"] = g["quarter_dt"].dt.to_period("Q")
@@ -357,204 +255,249 @@ def fit_uplift_coefs(panel_bank: pd.DataFrame, window_years: int = 2) -> Tuple[f
     # QoQ % changes
     g["d_ps"]  = g.groupby("bank")["purchase_sales_bn"].pct_change()
     g["d_cif"] = g.groupby("bank")[cif_col].pct_change()
-    g["d_bal"] = g.groupby("bank")[bal_col].pct_change()
+    g["d_spc"] = g.groupby("bank")[spc_col].pct_change()
 
-    # Baseline PS growth per quarter: rolling QoQ avg by quarter-of-year, expanding.
+    # PS rolling baseline growth by quarter-of-year (expanding)
     base_g = []
-    # Build pools per bank&quarter for past PS QoQ factors (not % but close; use % to be consistent)
     for b, gb in g.groupby("bank"):
         pools = {1:[],2:[],3:[],4:[]}
-        done = {1:0,2:0,3:0,4:0}
-        series = gb["purchase_sales_bn"].values
-        per_b  = gb["per"].values
-        q_b    = gb["qtr"].values
-
-        # compute QoQ % for PS first (aligned)
-        dps = gb["d_ps"].values
+        done  = {1:0,2:0,3:0,4:0}
+        dps   = gb["d_ps"].values
+        q_b   = gb["qtr"].values
         base_series = []
         for i in range(len(gb)):
             q = q_b[i]
-            # use pool (past dps for same q)
             pool = pools[q]
-            K = base_window_years + done[q]  # expanding window for in-sample too
+            K = window_years + done[q]
             if len(pool) == 0:
-                g_base = np.nan  # cannot baseline first time; will drop later
+                g_base = np.nan
             else:
                 use = pool[-K:] if len(pool)>=K else pool
                 g_base = float(np.median(use) if use_median_A else np.mean(use))
             base_series.append(g_base)
-            # after computing baseline for this point, add actual dps[i] to pool if available
             if pd.notna(dps[i]):
                 pools[q].append(dps[i]); done[q]+=1
         base_g.append(pd.Series(base_series, index=gb.index))
-
     g["g_base"] = pd.concat(base_g).sort_index()
+
     # Residual growth
     g["r_ps"] = g["d_ps"] - g["g_base"]
 
-    fit = g.dropna(subset=["r_ps","d_cif","d_bal"]).copy()
+    fit = g.dropna(subset=["r_ps","d_cif","d_spc","per","bank"]).copy()
     if fit.empty:
         return 0.0, 0.0, 0.0, pd.DataFrame()
 
-    # Winsorize big movements to reduce outlier leverage
-    for col in ["r_ps","d_cif","d_bal"]:
+    # Winsorize extremes to reduce leverage
+    for col in ["r_ps","d_cif","d_spc"]:
         fit[col] = fit[col].clip(lower=-0.5, upper=0.5)
 
-    # Design matrix: [1, d_cif, d_bal]
-    X = np.column_stack([
-        np.ones(len(fit)),
-        fit["d_cif"].to_numpy(),
-        fit["d_bal"].to_numpy()
-    ])
+    # OLS by numpy lstsq: r_ps = a + b1*d_cif + b2*d_spc
+    X = np.column_stack([np.ones(len(fit)), fit["d_cif"].to_numpy(), fit["d_spc"].to_numpy()])
     y = fit["r_ps"].to_numpy()
     beta, *_ = np.linalg.lstsq(X, y, rcond=None)
-    intercept, b_cif, b_bal = float(beta[0]), float(beta[1]), float(beta[2])
+    intercept, b_cif, b_spc = float(beta[0]), float(beta[1]), float(beta[2])
 
-    return b_cif, b_bal, intercept, fit
+    return b_cif, b_spc, intercept, fit
 
-def project_method_c(bank_df: pd.DataFrame, b_cif: float, b_bal: float, intercept: float) -> pd.DataFrame:
+b_cif, b_spc, b_int, fit_df = fit_uplift_coefs(panel[panel["bank"].isin(banks_pick)], window_years=base_window_years)
+
+# =========================
+# PROJECTIONS
+# =========================
+def project_method_A(bank_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Forecast PS with: g_ps = g_base + (intercept + b_cif*d_cif + b_bal*d_bal), then compound.
-    - g_base from PS rolling QoQ seasonal (expanding window).
-    - d_cif, d_bal from CIF & Balances rolling QoQ seasonal (expanding window).
+    Method A:
+      Baseline PS growth = rolling QoQ seasonal avg (expanding)
+      Driver growths (Δ%CIF, Δ%SPC) = rolling QoQ seasonal avg (expanding)
+      g_total = g_base + cap(intercept + b_cif*d_cif + b_spc*d_spc, ±cap)
     """
     gb = bank_df.sort_values("quarter_dt").copy()
-    per = gb["quarter_dt"].dt.to_period("Q")
     last_dt  = gb["quarter_dt"].dropna().max()
     last_per = last_dt.to_period("Q")
     H = (TARGET_END.year - last_per.year) * 4 + (TARGET_END.quarter - last_per.quarter)
     if H <= 0: return pd.DataFrame()
 
-    # Initialize last levels
-    ps_last  = float(gb.iloc[-1]["purchase_sales_bn"])
-    cif_last = float(gb.iloc[-1][cif_col])
-    bal_last = float(gb.iloc[-1][bal_col])
-
-    # Build historical QoQ % pools per quarter for PS, CIF, BAL
-    hist_ps  = qoq_factors_by_quarter(gb["purchase_sales_bn"], gb["quarter_dt"])    # factors
+    # Historical QoQ factor pools by quarter
+    hist_ps  = qoq_factors_by_quarter(gb["purchase_sales_bn"], gb["quarter_dt"])
     hist_cif = qoq_factors_by_quarter(gb[cif_col], gb["quarter_dt"])
-    hist_bal = qoq_factors_by_quarter(gb[bal_col], gb["quarter_dt"])
-    fore_ps, fore_cif, fore_bal = {1:[],2:[],3:[],4:[]}, {1:[],2:[],3:[],4:[]}, {1:[],2:[],3:[],4:[]}
+    hist_spc = qoq_factors_by_quarter(gb[spc_col], gb["quarter_dt"])
+
+    fore_ps, fore_cif, fore_spc = {1:[],2:[],3:[],4:[]}, {1:[],2:[],3:[],4:[]}, {1:[],2:[],3:[],4:[]}
     done_cnt = {1:0,2:0,3:0,4:0}
 
-    rows = []
-    level_ps, level_cif, level_bal = ps_last, cif_last, bal_last
+    level_ps  = float(gb.iloc[-1]["purchase_sales_bn"])
+    level_cif = float(gb.iloc[-1][cif_col])
+    level_spc = float(gb.iloc[-1][spc_col])
 
-    ppt_cap = uplift_cap_pct_pts / 100.0  # convert ppt to proportion for cap
+    rows = []
+    cap_prop = uplift_cap_pct_pts/100.0
 
     for h in range(1, H+1):
         t = last_per + h; q = t.quarter
+        prev_ps, prev_cif, prev_spc = level_ps, level_cif, level_spc
 
-        # Previous quarter levels for deltas
-        prev_ps  = level_ps
-        prev_cif = level_cif
-        prev_bal = level_bal
-
-        # --- Baseline g_base from PS rolling QoQ seasonal
+        # Baseline PS growth (proportion)
         Kp = base_window_years + done_cnt[q]
         pool_ps = hist_ps[q] + fore_ps[q]
         f_ps_base = robust_mean(pool_ps[-Kp:] if len(pool_ps)>=Kp else pool_ps, median=use_median_A) if pool_ps else 1.0
         f_ps_base = f_ps_base if (np.isfinite(f_ps_base) and f_ps_base>0) else 1.0
-        g_base = f_ps_base - 1.0  # baseline growth (proportion)
+        g_base = f_ps_base - 1.0
 
-        # --- Driver % changes from rolling QoQ seasonal (as proportions)
+        # Driver % changes (proportion) via rolling QoQ avg
         Kd = base_window_years + done_cnt[q]
-        # CIF
         pool_cif = hist_cif[q] + fore_cif[q]
+        pool_spc = hist_spc[q] + fore_spc[q]
         f_cif = robust_mean(pool_cif[-Kd:] if len(pool_cif)>=Kd else pool_cif, median=use_median_A) if pool_cif else 1.0
+        f_spc = robust_mean(pool_spc[-Kd:] if len(pool_spc)>=Kd else pool_spc, median=use_median_A) if pool_spc else 1.0
         f_cif = f_cif if (np.isfinite(f_cif) and f_cif>0) else 1.0
+        f_spc = f_spc if (np.isfinite(f_spc) and f_spc>0) else 1.0
         d_cif = f_cif - 1.0
-        # BAL
-        pool_bal = hist_bal[q] + fore_bal[q]
-        f_bal = robust_mean(pool_bal[-Kd:] if len(pool_bal)>=Kd else pool_bal, median=use_median_A) if pool_bal else 1.0
-        f_bal = f_bal if (np.isfinite(f_bal) and f_bal>0) else 1.0
-        d_bal = f_bal - 1.0
+        d_spc = f_spc - 1.0
 
-        # --- Uplift (capped)
-        uplift = intercept + b_cif*d_cif + b_bal*d_bal
-        uplift = max(min(uplift, ppt_cap), -ppt_cap)
-
-        # --- Total PS growth & evolve
+        # Uplift
+        uplift = b_int + b_cif*d_cif + b_spc*d_spc
+        uplift = max(min(uplift, cap_prop), -cap_prop)
         g_total = g_base + uplift
-        level_ps  = level_ps  * (1.0 + g_total)
-        level_cif = level_cif * (1.0 + d_cif)
-        level_bal = level_bal * (1.0 + d_bal)
 
-        # Append forecast factors for expanding windows
-        fore_ps[q].append(1.0 + g_base)   # store baseline factor, not total
+        # Evolve levels
+        level_ps  *= (1.0 + g_total)
+        level_cif *= (1.0 + d_cif)
+        level_spc *= (1.0 + d_spc)
+
+        # Append factors so windows expand
+        fore_ps[q].append(1.0 + g_base)
         fore_cif[q].append(1.0 + d_cif)
-        fore_bal[q].append(1.0 + d_bal)
+        fore_spc[q].append(1.0 + d_spc)
         done_cnt[q] += 1
 
-        # Deltas (%)
+        # QoQ deltas (%)
         d_ps_pct  = (level_ps/prev_ps  - 1)*100 if prev_ps  else np.nan
         d_cif_pct = (level_cif/prev_cif - 1)*100 if prev_cif else np.nan
-        d_bal_pct = (level_bal/prev_bal - 1)*100 if prev_bal else np.nan
+        d_spc_pct = (level_spc/prev_spc - 1)*100 if prev_spc else np.nan
 
         rows.append({
             "quarter": str(t),
             "bank": gb["bank"].iloc[0],
-            "method": "Method C (Baseline×Uplift)",
+            "method": "Method A (Rolling QoQ + uplift)",
             "projected_purchase_sales_bn": level_ps,
             "projected_cif_bn": level_cif,
-            "projected_balances_bn": level_bal,
-            "delta_purchase_sales_pct": round(d_ps_pct,2) if pd.notna(d_ps_pct) else None,
-            "delta_cif_pct": round(d_cif_pct,2) if pd.notna(d_cif_pct) else None,
-            "delta_balances_pct": round(d_bal_pct,2) if pd.notna(d_bal_pct) else None,
+            "projected_sales_per_cif_000": level_spc,
+            "delta_purchase_sales_pct": round(d_ps_pct,2)  if pd.notna(d_ps_pct)  else None,
+            "delta_cif_pct":            round(d_cif_pct,2) if pd.notna(d_cif_pct) else None,
+            "delta_sales_per_cif_pct":  round(d_spc_pct,2) if pd.notna(d_spc_pct) else None,
+            "ps_uplift_pp":             round(uplift*100.0, 2),
+            "ps_uplift_multiplier":     round(1.0 + uplift, 4),
         })
+    return pd.DataFrame(rows)
 
+def project_method_B(bank_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Method B:
+      Baseline PS growth = latest same-quarter QoQ (carry-forward)
+      Driver growths (Δ%CIF, Δ%SPC) = latest same-quarter QoQ (carry-forward)
+      g_total = g_base + cap(intercept + b_cif*d_cif + b_spc*d_spc, ±cap)
+    """
+    gb = bank_df.sort_values("quarter_dt").copy()
+    last_dt  = gb["quarter_dt"].dropna().max()
+    last_per = last_dt.to_period("Q")
+    H = (TARGET_END.year - last_per.year) * 4 + (TARGET_END.quarter - last_per.quarter)
+    if H <= 0: return pd.DataFrame()
+
+    latest_ps  = latest_same_quarter_qoq(gb["purchase_sales_bn"], gb["quarter_dt"])
+    latest_cif = latest_same_quarter_qoq(gb[cif_col], gb["quarter_dt"])
+    latest_spc = latest_same_quarter_qoq(gb[spc_col], gb["quarter_dt"])
+
+    level_ps  = float(gb.iloc[-1]["purchase_sales_bn"])
+    level_cif = float(gb.iloc[-1][cif_col])
+    level_spc = float(gb.iloc[-1][spc_col])
+
+    rows = []
+    cap_prop = uplift_cap_pct_pts/100.0
+
+    for h in range(1, H+1):
+        t = last_per + h; q = t.quarter
+        prev_ps, prev_cif, prev_spc = level_ps, level_cif, level_spc
+
+        # Baseline (latest same-quarter QoQ)
+        f_ps_base = latest_ps.get(q, 1.0); f_ps_base = f_ps_base if (np.isfinite(f_ps_base) and f_ps_base>0) else 1.0
+        g_base = f_ps_base - 1.0
+
+        # Drivers (latest same-quarter QoQ)
+        f_cif = latest_cif.get(q, 1.0); f_cif = f_cif if (np.isfinite(f_cif) and f_cif>0) else 1.0
+        f_spc = latest_spc.get(q, 1.0); f_spc = f_spc if (np.isfinite(f_spc) and f_spc>0) else 1.0
+        d_cif = f_cif - 1.0
+        d_spc = f_spc - 1.0
+
+        # Uplift
+        uplift = b_int + b_cif*d_cif + b_spc*d_spc
+        uplift = max(min(uplift, cap_prop), -cap_prop)
+        g_total = g_base + uplift
+
+        # Evolve levels
+        level_ps  *= (1.0 + g_total)
+        level_cif *= (1.0 + d_cif)
+        level_spc *= (1.0 + d_spc)
+
+        # QoQ deltas (%)
+        d_ps_pct  = (level_ps/prev_ps  - 1)*100 if prev_ps  else np.nan
+        d_cif_pct = (level_cif/prev_cif - 1)*100 if prev_cif else np.nan
+        d_spc_pct = (level_spc/prev_spc - 1)*100 if prev_spc else np.nan
+
+        rows.append({
+            "quarter": str(t),
+            "bank": gb["bank"].iloc[0],
+            "method": "Method B (Latest QoQ + uplift)",
+            "projected_purchase_sales_bn": level_ps,
+            "projected_cif_bn": level_cif,
+            "projected_sales_per_cif_000": level_spc,
+            "delta_purchase_sales_pct": round(d_ps_pct,2)  if pd.notna(d_ps_pct)  else None,
+            "delta_cif_pct":            round(d_cif_pct,2) if pd.notna(d_cif_pct) else None,
+            "delta_sales_per_cif_pct":  round(d_spc_pct,2) if pd.notna(d_spc_pct) else None,
+            "ps_uplift_pp":             round(uplift*100.0, 2),
+            "ps_uplift_multiplier":     round(1.0 + uplift, 4),
+        })
     return pd.DataFrame(rows)
 
 # =========================
-# RUN ALL METHODS
+# RUN BOTH METHODS
 # =========================
-proj_A_frames, proj_B_frames, proj_C_frames, hist_frames = [], [], [], []
+proj_A_frames, proj_B_frames, hist_frames = [], [], []
 for b in banks_pick:
-    gb = panel[panel["bank"] == b][["bank","quarter_dt", cif_col, spc_col, bal_col, "purchase_sales_bn"]]
+    gb = panel[panel["bank"] == b][["bank","quarter_dt", cif_col, spc_col, "purchase_sales_bn"]]
     if gb.shape[0] < 3:
         continue
-    # Actuals cache for charts
     hist_frames.append(gb.assign(method="Actual"))
-
-    # A & B for CIF/SPC identity
-    pa = project_rolling_qoq_identity(gb)
-    pb = project_latest_qoq_identity(gb)
-
-    # Fit uplift coeffs on pooled (we can fit once on all banks, but for simplicity fit pooled per selection)
-    # We'll concatenate selected banks to fit one pooled model.
-    proj_A_frames.append(pa) if not pa.empty else None
-    proj_B_frames.append(pb) if not pb.empty else None
-
-# Fit uplift coefficients pooled on selected banks
-fit_panel = panel[panel["bank"].isin(banks_pick)].copy()
-b_cif, b_bal, b_int, fit_df = fit_uplift_coefs(fit_panel, window_years=base_window_years)
-
-# Now project Method C per bank
-for b in banks_pick:
-    gb = panel[panel["bank"] == b][["bank","quarter_dt", cif_col, spc_col, bal_col, "purchase_sales_bn"]]
-    if gb.shape[0] < 3:
-        continue
-    pc = project_method_c(gb, b_cif, b_bal, b_int)
-    if not pc.empty:
-        proj_C_frames.append(pc)
+    pa = project_method_A(gb)
+    pb = project_method_B(gb)
+    if not pa.empty: proj_A_frames.append(pa)
+    if not pb.empty: proj_B_frames.append(pb)
 
 proj_A = pd.concat(proj_A_frames, ignore_index=True) if proj_A_frames else pd.DataFrame()
 proj_B = pd.concat(proj_B_frames, ignore_index=True) if proj_B_frames else pd.DataFrame()
-proj_C = pd.concat(proj_C_frames, ignore_index=True) if proj_C_frames else pd.DataFrame()
 
-# Round levels per UI (keep deltas numeric for formatting later)
+# Round levels per UI
 for dfp in [proj_A, proj_B]:
     if not dfp.empty:
-        dfp["projected_cif_bn"] = dfp["projected_cif_bn"].round(int(round_dec))
-        dfp["projected_sales_per_cif_000"] = dfp["projected_sales_per_cif_000"].round(int(round_dec))
-        dfp["projected_purchase_sales_bn"] = dfp["projected_purchase_sales_bn"].round(int(round_dec))
-if not proj_C.empty:
-    proj_C["projected_cif_bn"]       = proj_C["projected_cif_bn"].round(int(round_dec))
-    proj_C["projected_balances_bn"]  = proj_C["projected_balances_bn"].round(int(round_dec))
-    proj_C["projected_purchase_sales_bn"] = proj_C["projected_purchase_sales_bn"].round(int(round_dec))
+        for col in ["projected_cif_bn","projected_sales_per_cif_000","projected_purchase_sales_bn"]:
+            dfp[col] = dfp[col].round(int(round_dec))
 
 # =========================
-# CHARTS — A/B/C metric overlay
+# COEFFICIENTS PANEL
+# =========================
+with st.expander("Coefficients used for uplift (pooled, residualized vs PS baseline)", expanded=True):
+    st.markdown(
+        f"""
+- **Intercept (α)**: **{b_int:.4f}**  
+- **β (Δ% CIF)**: **{b_cif:.4f}**  
+- **β (Δ% Sales/CIF)**: **{b_spc:.4f}**  
+
+*These coefficients tilt the PS baseline each quarter by:*  
+`uplift = α + β_CIF * Δ%CIF + β_SPC * Δ%Sales/CIF`, **capped** to ±{uplift_cap_pct_pts:.0f} pp.
+"""
+    )
+
+# =========================
+# CHARTS — Method A & Method B overlays
 # =========================
 color_scale = alt.Scale(scheme='tableau10')
 
@@ -568,11 +511,10 @@ def chart_method(method_name: str, metric_code: str):
     actual = actual.rename(columns={metric_code:"value"}).assign(scenario="Actual")
     overlays.append(actual[["bank","quarter_dt","value","scenario"]])
 
-    # Projections (map by method)
+    # Projections
     mapping = {
-        "Rolling Seasonal (QoQ avg)": proj_A,
-        "Latest QoQ": proj_B,
-        "Method C (Baseline×Uplift)": proj_C,
+        "Method A (Rolling QoQ + uplift)": proj_A,
+        "Method B (Latest QoQ + uplift)":  proj_B,
     }
     dfp = mapping.get(method_name, pd.DataFrame())
     if dfp.empty: return None
@@ -580,7 +522,6 @@ def chart_method(method_name: str, metric_code: str):
     rename_map = {
         "projected_cif_bn":"cards_in_force_bn",
         "projected_sales_per_cif_000":"sales_per_cif_000",
-        "projected_balances_bn":"balances_bn",
         "projected_purchase_sales_bn":"purchase_sales_bn",
     }
     use = dfp.rename(columns=rename_map)
@@ -590,7 +531,6 @@ def chart_method(method_name: str, metric_code: str):
 
     overlay = pd.concat(overlays, ignore_index=True)
 
-    # Build chart
     actual_line = (
         alt.Chart(overlay).transform_filter(alt.datum.scenario == "Actual")
           .mark_line(point=True, strokeWidth=2)
@@ -616,38 +556,33 @@ def chart_method(method_name: str, metric_code: str):
 
 metric_pick = st.selectbox(
     "Metric to chart",
-    options=[FRIENDLY["purchase_sales_bn"], FRIENDLY["cards_in_force_bn"], FRIENDLY["balances_bn"], FRIENDLY["sales_per_cif_000"]],
+    options=[FRIENDLY["purchase_sales_bn"], FRIENDLY["cards_in_force_bn"], FRIENDLY["sales_per_cif_000"]],
     index=0
 )
 metric_code = {v:k for k,v in FRIENDLY.items()}[metric_pick]
 
-col1, col2, col3 = st.columns(3)
+col1, col2 = st.columns(2)
 with col1:
-    st.subheader("Method A — Rolling Seasonal (QoQ avg)")
-    chA = chart_method("Rolling Seasonal (QoQ avg)", metric_code)
+    st.subheader("Method A — Rolling QoQ baseline + uplift")
+    chA = chart_method("Method A (Rolling QoQ + uplift)", metric_code)
     st.altair_chart(chA, use_container_width=True) if chA else st.info("No projections for Method A.")
 with col2:
-    st.subheader("Method B — Latest same‑quarter QoQ")
-    chB = chart_method("Latest QoQ", metric_code)
+    st.subheader("Method B — Latest QoQ baseline + uplift")
+    chB = chart_method("Method B (Latest QoQ + uplift)", metric_code)
     st.altair_chart(chB, use_container_width=True) if chB else st.info("No projections for Method B.")
-with col3:
-    st.subheader("Method C — Baseline × Driver‑Uplift")
-    chC = chart_method("Method C (Baseline×Uplift)", metric_code)
-    st.altair_chart(chC, use_container_width=True) if chC else st.info("No projections for Method C.")
 
 # =========================
-# DRIVER DIAGNOSTICS — Best-fit lines (Method C)
+# DRIVER DIAGNOSTICS — Best-fit lines on raw Δ% (for intuition)
 # =========================
-st.subheader("Method C — Driver diagnostics (best‑fit lines)")
+st.subheader("Driver diagnostics (best‑fit lines on QoQ %)")
 if fit_df.empty:
-    st.info("Not enough data to estimate uplift coefficients.")
+    st.info("Not enough data to estimate coefficients.")
 else:
-    # Scatter of Δ%PS vs Δ%CIF and Δ%PS vs Δ%BAL with regression lines (simple, not residuals for viewing clarity)
-    diag = fit_df.dropna(subset=["d_ps","d_cif","d_bal"]).copy()
-    # Convert to percent for display
-    diag["d_ps_pct"]  = diag["d_ps"]*100
-    diag["d_cif_pct"] = diag["d_cif"]*100
-    diag["d_bal_pct"] = diag["d_bal"]*100
+    diag = fit_df.dropna(subset=["d_ps","d_cif","d_spc","per","bank"]).copy()
+    diag["quarter_dt"]  = diag["per"].dt.to_timestamp()
+    diag["d_ps_pct"]    = diag["d_ps"]*100
+    diag["d_cif_pct"]   = diag["d_cif"]*100
+    diag["d_spc_pct"]   = diag["d_spc"]*100
 
     def scatter_with_line(df, x, y, x_title, y_title):
         base = alt.Chart(df).mark_circle(size=60, opacity=0.5).encode(
@@ -656,24 +591,23 @@ else:
             color=alt.Color("bank:N", legend=None, scale=color_scale),
             tooltip=["bank","quarter_dt", alt.Tooltip(x, format=",.2f"), alt.Tooltip(y, format=",.2f")]
         )
-        # Regression line via transform_regression
         line = alt.Chart(df).transform_regression(x, y).mark_line(color="#e31a1c", strokeWidth=2)
         return (base + line).properties(height=320)
 
     c1, c2 = st.columns(2)
     with c1:
         st.caption("Δ% Purchase Sales vs Δ% CIF (QoQ)")
-        st.altair_chart(scatter_with_line(diag.assign(quarter_dt=diag["per"].dt.to_timestamp()),
-                                          "d_cif_pct","d_ps_pct",
-                                          "Δ% CIF (QoQ, %)", "Δ% Purchase Sales (QoQ, %)"), use_container_width=True)
+        st.altair_chart(scatter_with_line(diag, "d_cif_pct", "d_ps_pct",
+                                          "Δ% CIF (QoQ, %)", "Δ% Purchase Sales (QoQ, %)"),
+                        use_container_width=True)
     with c2:
-        st.caption("Δ% Purchase Sales vs Δ% Balances (QoQ)")
-        st.altair_chart(scatter_with_line(diag.assign(quarter_dt=diag["per"].dt.to_timestamp()),
-                                          "d_bal_pct","d_ps_pct",
-                                          "Δ% Balances (QoQ, %)", "Δ% Purchase Sales (QoQ, %)"), use_container_width=True)
+        st.caption("Δ% Purchase Sales vs Δ% Sales/CIF (QoQ)")
+        st.altair_chart(scatter_with_line(diag, "d_spc_pct", "d_ps_pct",
+                                          "Δ% Sales/CIF (QoQ, %)", "Δ% Purchase Sales (QoQ, %)"),
+                        use_container_width=True)
 
 # =========================
-# TABLES — A/B/C with % delta formatting
+# TABLES — Method A & Method B (with % deltas and uplift columns)
 # =========================
 def tidy_sort_percent(dfp: pd.DataFrame, cols_pct: List[str]) -> pd.DataFrame:
     if dfp.empty: return dfp
@@ -684,35 +618,29 @@ def tidy_sort_percent(dfp: pd.DataFrame, cols_pct: List[str]) -> pd.DataFrame:
     dfp = format_percent_cols(dfp, cols_pct)
     return dfp
 
-st.subheader("Projections Table — Method A (Rolling Seasonal QoQ avg)")
+st.subheader("Projections Table — Method A (Rolling QoQ + uplift)")
 if not proj_A.empty:
-    show_A = tidy_sort_percent(
-        proj_A[["quarter","bank","method","projected_purchase_sales_bn","projected_cif_bn","projected_sales_per_cif_000",
-                "delta_purchase_sales_pct","delta_cif_pct","delta_sales_per_cif_pct"]],
-        ["delta_purchase_sales_pct","delta_cif_pct","delta_sales_per_cif_pct"]
-    )
+    colsA = ["quarter","bank","method",
+             "projected_purchase_sales_bn","projected_cif_bn","projected_sales_per_cif_000",
+             "delta_purchase_sales_pct","delta_cif_pct","delta_sales_per_cif_pct",
+             "ps_uplift_pp","ps_uplift_multiplier"]
+    show_A = tidy_sort_percent(proj_A[colsA], ["delta_purchase_sales_pct","delta_cif_pct","delta_sales_per_cif_pct"])
+    # format uplift columns nicely
+    show_A["ps_uplift_pp"]         = show_A["ps_uplift_pp"].apply(lambda x: f"{x:.2f} pp" if pd.notna(x) else None)
+    show_A["ps_uplift_multiplier"] = show_A["ps_uplift_multiplier"].apply(lambda x: f"{x:.4f} ×" if pd.notna(x) else None)
     st.dataframe(show_A, use_container_width=True)
 else:
     st.info("No projections to show for Method A.")
 
-st.subheader("Projections Table — Method B (Latest same‑quarter QoQ)")
+st.subheader("Projections Table — Method B (Latest QoQ + uplift)")
 if not proj_B.empty:
-    show_B = tidy_sort_percent(
-        proj_B[["quarter","bank","method","projected_purchase_sales_bn","projected_cif_bn","projected_sales_per_cif_000",
-                "delta_purchase_sales_pct","delta_cif_pct","delta_sales_per_cif_pct"]],
-        ["delta_purchase_sales_pct","delta_cif_pct","delta_sales_per_cif_pct"]
-    )
+    colsB = ["quarter","bank","method",
+             "projected_purchase_sales_bn","projected_cif_bn","projected_sales_per_cif_000",
+             "delta_purchase_sales_pct","delta_cif_pct","delta_sales_per_cif_pct",
+             "ps_uplift_pp","ps_uplift_multiplier"]
+    show_B = tidy_sort_percent(proj_B[colsB], ["delta_purchase_sales_pct","delta_cif_pct","delta_sales_per_cif_pct"])
+    show_B["ps_uplift_pp"]         = show_B["ps_uplift_pp"].apply(lambda x: f"{x:.2f} pp" if pd.notna(x) else None)
+    show_B["ps_uplift_multiplier"] = show_B["ps_uplift_multiplier"].apply(lambda x: f"{x:.4f} ×" if pd.notna(x) else None)
     st.dataframe(show_B, use_container_width=True)
 else:
     st.info("No projections to show for Method B.")
-
-st.subheader("Projections Table — Method C (Baseline × Driver‑Uplift)")
-if not proj_C.empty:
-    show_C = tidy_sort_percent(
-        proj_C[["quarter","bank","method","projected_purchase_sales_bn","projected_cif_bn","projected_balances_bn",
-                "delta_purchase_sales_pct","delta_cif_pct","delta_balances_pct"]],
-        ["delta_purchase_sales_pct","delta_cif_pct","delta_balances_pct"]
-    )
-    st.dataframe(show_C, use_container_width=True)
-else:
-    st.info("No projections to show for Method C.")
