@@ -1,9 +1,8 @@
 # app.py
-# CCAP — Two methods (PS baseline from PS history) + driver uplift via CIF & Sales/CIF (NO Balances)
-# Method A: PS baseline = Rolling QoQ seasonal avg; Drivers (Δ%CIF, Δ%SPC) = Rolling QoQ seasonal avg
-# Method B: PS baseline = Latest same-quarter QoQ; Drivers (Δ%CIF, Δ%SPC) = Latest same-quarter QoQ
-# Coefficients (intercept, β_CIF, β_SPC) are estimated once (pooled) on residual PS growth.
-# Output: charts (A & B) + tables (+ QoQ % delta formatting) + coefficient panel + driver scatter with best-fit lines.
+# CCAP — Two PS baselines (A/B) + CIF/SPC uplift; adds scenario lever; removes guides below charts.
+# Method A: PS baseline = Rolling QoQ seasonal avg (expanding), Drivers (Δ%CIF, Δ%SPC) = Rolling QoQ seasonal avg
+# Method B: PS baseline = Latest same-quarter QoQ, Drivers (Δ%CIF, Δ%SPC) = Latest same-quarter QoQ
+# Uplift: pooled coefficients on residual PS growth (no balances). Scenario adds ±ppt to PS growth per quarter.
 
 import re
 from typing import Dict, List, Tuple
@@ -176,6 +175,11 @@ use_median_A = st.sidebar.checkbox("Use median (instead of mean) for A", value=F
 st.sidebar.header("Uplift cap")
 uplift_cap_pct_pts = st.sidebar.slider("Cap uplift contribution (±ppt)", 2.0, 15.0, 8.0, 1.0)
 
+st.sidebar.header("Scenario")
+scenario = st.sidebar.radio("Scenario", ["Pessimistic","Realistic","Optimistic"], index=1, horizontal=True)
+scenario_shift_ppt = st.sidebar.slider("Scenario shift (±ppt added to PS growth)", 0.0, 10.0, 1.5, 0.1)
+scenario_adj_prop = (scenario_shift_ppt/100.0) * (1 if scenario=="Optimistic" else (-1 if scenario=="Pessimistic" else 0))
+
 # =========================
 # LOAD & NORMALIZE
 # =========================
@@ -236,7 +240,7 @@ if not banks_pick:
     st.stop()
 
 # =========================
-# COEFFICIENT ESTIMATION (pooled) — on residual growth vs PS rolling baseline
+# COEFFICIENT ESTIMATION (pooled) — on residual PS growth vs PS rolling baseline
 # =========================
 def fit_uplift_coefs(panel_bank: pd.DataFrame, window_years: int = 2) -> Tuple[float,float,float,pd.DataFrame]:
     """
@@ -287,7 +291,7 @@ def fit_uplift_coefs(panel_bank: pd.DataFrame, window_years: int = 2) -> Tuple[f
     if fit.empty:
         return 0.0, 0.0, 0.0, pd.DataFrame()
 
-    # Winsorize extremes to reduce leverage
+    # Winsorize extremes
     for col in ["r_ps","d_cif","d_spc"]:
         fit[col] = fit[col].clip(lower=-0.5, upper=0.5)
 
@@ -304,12 +308,12 @@ b_cif, b_spc, b_int, fit_df = fit_uplift_coefs(panel[panel["bank"].isin(banks_pi
 # =========================
 # PROJECTIONS
 # =========================
-def project_method_A(bank_df: pd.DataFrame) -> pd.DataFrame:
+def project_method_A(bank_df: pd.DataFrame, scenario_adj_prop: float) -> pd.DataFrame:
     """
     Method A:
       Baseline PS growth = rolling QoQ seasonal avg (expanding)
       Driver growths (Δ%CIF, Δ%SPC) = rolling QoQ seasonal avg (expanding)
-      g_total = g_base + cap(intercept + b_cif*d_cif + b_spc*d_spc, ±cap)
+      g_total = g_base + cap(intercept + b_cif*d_cif + b_spc*d_spc, ±cap) + scenario_adj_prop
     """
     gb = bank_df.sort_values("quarter_dt").copy()
     last_dt  = gb["quarter_dt"].dropna().max()
@@ -357,7 +361,7 @@ def project_method_A(bank_df: pd.DataFrame) -> pd.DataFrame:
         # Uplift
         uplift = b_int + b_cif*d_cif + b_spc*d_spc
         uplift = max(min(uplift, cap_prop), -cap_prop)
-        g_total = g_base + uplift
+        g_total = g_base + uplift + scenario_adj_prop
 
         # Evolve levels
         level_ps  *= (1.0 + g_total)
@@ -387,15 +391,16 @@ def project_method_A(bank_df: pd.DataFrame) -> pd.DataFrame:
             "delta_sales_per_cif_pct":  round(d_spc_pct,2) if pd.notna(d_spc_pct) else None,
             "ps_uplift_pp":             round(uplift*100.0, 2),
             "ps_uplift_multiplier":     round(1.0 + uplift, 4),
+            "scenario_shift_pp":        round(scenario_adj_prop*100.0, 2),
         })
     return pd.DataFrame(rows)
 
-def project_method_B(bank_df: pd.DataFrame) -> pd.DataFrame:
+def project_method_B(bank_df: pd.DataFrame, scenario_adj_prop: float) -> pd.DataFrame:
     """
     Method B:
       Baseline PS growth = latest same-quarter QoQ (carry-forward)
       Driver growths (Δ%CIF, Δ%SPC) = latest same-quarter QoQ (carry-forward)
-      g_total = g_base + cap(intercept + b_cif*d_cif + b_spc*d_spc, ±cap)
+      g_total = g_base + cap(intercept + b_cif*d_cif + b_spc*d_spc, ±cap) + scenario_adj_prop
     """
     gb = bank_df.sort_values("quarter_dt").copy()
     last_dt  = gb["quarter_dt"].dropna().max()
@@ -431,7 +436,7 @@ def project_method_B(bank_df: pd.DataFrame) -> pd.DataFrame:
         # Uplift
         uplift = b_int + b_cif*d_cif + b_spc*d_spc
         uplift = max(min(uplift, cap_prop), -cap_prop)
-        g_total = g_base + uplift
+        g_total = g_base + uplift + scenario_adj_prop
 
         # Evolve levels
         level_ps  *= (1.0 + g_total)
@@ -455,6 +460,7 @@ def project_method_B(bank_df: pd.DataFrame) -> pd.DataFrame:
             "delta_sales_per_cif_pct":  round(d_spc_pct,2) if pd.notna(d_spc_pct) else None,
             "ps_uplift_pp":             round(uplift*100.0, 2),
             "ps_uplift_multiplier":     round(1.0 + uplift, 4),
+            "scenario_shift_pp":        round(scenario_adj_prop*100.0, 2),
         })
     return pd.DataFrame(rows)
 
@@ -467,8 +473,8 @@ for b in banks_pick:
     if gb.shape[0] < 3:
         continue
     hist_frames.append(gb.assign(method="Actual"))
-    pa = project_method_A(gb)
-    pb = project_method_B(gb)
+    pa = project_method_A(gb, scenario_adj_prop)
+    pb = project_method_B(gb, scenario_adj_prop)
     if not pa.empty: proj_A_frames.append(pa)
     if not pb.empty: proj_B_frames.append(pb)
 
@@ -482,7 +488,7 @@ for dfp in [proj_A, proj_B]:
             dfp[col] = dfp[col].round(int(round_dec))
 
 # =========================
-# COEFFICIENTS PANEL
+# COEFFICIENTS PANEL (kept; no guides below charts)
 # =========================
 with st.expander("Coefficients used for uplift (pooled, residualized vs PS baseline)", expanded=True):
     st.markdown(
@@ -491,13 +497,13 @@ with st.expander("Coefficients used for uplift (pooled, residualized vs PS basel
 - **β (Δ% CIF)**: **{b_cif:.4f}**  
 - **β (Δ% Sales/CIF)**: **{b_spc:.4f}**  
 
-*These coefficients tilt the PS baseline each quarter by:*  
-`uplift = α + β_CIF * Δ%CIF + β_SPC * Δ%Sales/CIF`, **capped** to ±{uplift_cap_pct_pts:.0f} pp.
+**Scenario:** **{scenario}** (adds **{scenario_shift_ppt:.1f} pp** to PS growth per quarter).  
+**Uplift cap:** ±{uplift_cap_pct_pts:.0f} pp.
 """
     )
 
 # =========================
-# CHARTS — Method A & Method B overlays
+# CHARTS — Method A & Method B overlays (no guides below)
 # =========================
 color_scale = alt.Scale(scheme='tableau10')
 
@@ -572,41 +578,6 @@ with col2:
     st.altair_chart(chB, use_container_width=True) if chB else st.info("No projections for Method B.")
 
 # =========================
-# DRIVER DIAGNOSTICS — Best-fit lines on raw Δ% (for intuition)
-# =========================
-st.subheader("Driver diagnostics (best‑fit lines on QoQ %)")
-if fit_df.empty:
-    st.info("Not enough data to estimate coefficients.")
-else:
-    diag = fit_df.dropna(subset=["d_ps","d_cif","d_spc","per","bank"]).copy()
-    diag["quarter_dt"]  = diag["per"].dt.to_timestamp()
-    diag["d_ps_pct"]    = diag["d_ps"]*100
-    diag["d_cif_pct"]   = diag["d_cif"]*100
-    diag["d_spc_pct"]   = diag["d_spc"]*100
-
-    def scatter_with_line(df, x, y, x_title, y_title):
-        base = alt.Chart(df).mark_circle(size=60, opacity=0.5).encode(
-            x=alt.X(f"{x}:Q", title=x_title),
-            y=alt.Y(f"{y}:Q", title=y_title),
-            color=alt.Color("bank:N", legend=None, scale=color_scale),
-            tooltip=["bank","quarter_dt", alt.Tooltip(x, format=",.2f"), alt.Tooltip(y, format=",.2f")]
-        )
-        line = alt.Chart(df).transform_regression(x, y).mark_line(color="#e31a1c", strokeWidth=2)
-        return (base + line).properties(height=320)
-
-    c1, c2 = st.columns(2)
-    with c1:
-        st.caption("Δ% Purchase Sales vs Δ% CIF (QoQ)")
-        st.altair_chart(scatter_with_line(diag, "d_cif_pct", "d_ps_pct",
-                                          "Δ% CIF (QoQ, %)", "Δ% Purchase Sales (QoQ, %)"),
-                        use_container_width=True)
-    with c2:
-        st.caption("Δ% Purchase Sales vs Δ% Sales/CIF (QoQ)")
-        st.altair_chart(scatter_with_line(diag, "d_spc_pct", "d_ps_pct",
-                                          "Δ% Sales/CIF (QoQ, %)", "Δ% Purchase Sales (QoQ, %)"),
-                        use_container_width=True)
-
-# =========================
 # TABLES — Method A & Method B (with % deltas and uplift columns)
 # =========================
 def tidy_sort_percent(dfp: pd.DataFrame, cols_pct: List[str]) -> pd.DataFrame:
@@ -623,11 +594,12 @@ if not proj_A.empty:
     colsA = ["quarter","bank","method",
              "projected_purchase_sales_bn","projected_cif_bn","projected_sales_per_cif_000",
              "delta_purchase_sales_pct","delta_cif_pct","delta_sales_per_cif_pct",
-             "ps_uplift_pp","ps_uplift_multiplier"]
+             "ps_uplift_pp","ps_uplift_multiplier","scenario_shift_pp"]
     show_A = tidy_sort_percent(proj_A[colsA], ["delta_purchase_sales_pct","delta_cif_pct","delta_sales_per_cif_pct"])
     # format uplift columns nicely
     show_A["ps_uplift_pp"]         = show_A["ps_uplift_pp"].apply(lambda x: f"{x:.2f} pp" if pd.notna(x) else None)
     show_A["ps_uplift_multiplier"] = show_A["ps_uplift_multiplier"].apply(lambda x: f"{x:.4f} ×" if pd.notna(x) else None)
+    show_A["scenario_shift_pp"]    = show_A["scenario_shift_pp"].apply(lambda x: f"{x:.2f} pp" if pd.notna(x) else None)
     st.dataframe(show_A, use_container_width=True)
 else:
     st.info("No projections to show for Method A.")
@@ -637,10 +609,11 @@ if not proj_B.empty:
     colsB = ["quarter","bank","method",
              "projected_purchase_sales_bn","projected_cif_bn","projected_sales_per_cif_000",
              "delta_purchase_sales_pct","delta_cif_pct","delta_sales_per_cif_pct",
-             "ps_uplift_pp","ps_uplift_multiplier"]
+             "ps_uplift_pp","ps_uplift_multiplier","scenario_shift_pp"]
     show_B = tidy_sort_percent(proj_B[colsB], ["delta_purchase_sales_pct","delta_cif_pct","delta_sales_per_cif_pct"])
     show_B["ps_uplift_pp"]         = show_B["ps_uplift_pp"].apply(lambda x: f"{x:.2f} pp" if pd.notna(x) else None)
     show_B["ps_uplift_multiplier"] = show_B["ps_uplift_multiplier"].apply(lambda x: f"{x:.4f} ×" if pd.notna(x) else None)
+    show_B["scenario_shift_pp"]    = show_B["scenario_shift_pp"].apply(lambda x: f"{x:.2f} pp" if pd.notna(x) else None)
     st.dataframe(show_B, use_container_width=True)
 else:
     st.info("No projections to show for Method B.")
