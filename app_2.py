@@ -24,8 +24,8 @@ BANK_COLORS = {
     "UB": "#f28e2b",        # orange
     "BDO": "#4169E1",       # royal blue
     "RCBC": "#7ec8e3",      # light blue
-    "SECBANK": "#2ca02c",   # green
-    "MB": "#0b1c2d",        # navy (very dark blue)
+    "SECBANK": "#4CAF50",   # green
+    "MB": "#3B5B8A",        # navy (very dark blue)
     "BPI": "#d62728",       # red
 }
 
