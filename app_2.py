@@ -1,7 +1,8 @@
 # app_2.py
 # CCAP — Method C ONLY
-# True rolling same‑quarter QoQ baseline + CIF & Sales/CIF uplift
-# Quarter labels pulled DIRECTLY from raw QUARTER column
+# True rolling same‑quarter QoQ baseline
+# PS projected with CIF & Sales/CIF levels
+# Quarter labels use raw QUARTER column (e.g. 1Q23)
 # Bank colors fixed
 
 import numpy as np
@@ -20,23 +21,19 @@ TARGET_END = pd.Period("2028Q4", freq="Q")
 BANK_ORDER_PREF = ["UB", "BDO", "BPI", "SECBANK", "MB", "RCBC"]
 
 BANK_COLORS = {
-    "UB": "#f28e2b",        # orange
-    "BDO": "#4169E1",       # royal blue
-    "BPI": "#d62728",       # red
-    "SECBANK": "#4CAF50",   # lighter green
-    "MB": "#3B5B8A",        # lighter navy
-    "RCBC": "#7ec8e3",      # light blue
+    "UB": "#f28e2b",
+    "BDO": "#4169E1",
+    "BPI": "#d62728",
+    "SECBANK": "#4CAF50",
+    "MB": "#3B5B8A",
+    "RCBC": "#7ec8e3",
 }
 
 # =========================
 # HELPERS
 # =========================
 def parse_quarter_dt(q):
-    """
-    Raw format is always like '1Q23'.
-    Convert ONLY for sorting / math, not for display.
-    """
-    q = str(q).strip().upper()
+    q = str(q).strip().upper()   # e.g. 1Q23
     quarter = int(q[0])
     year = 2000 + int(q[2:])
     return pd.Period(year=year, quarter=quarter, freq="Q").to_timestamp(how="end")
@@ -101,7 +98,6 @@ raw = raw[
     ]
 ]
 
-# sorting / math timestamp only
 raw["quarter_dt"] = raw["quarter"].apply(parse_quarter_dt)
 
 for c in ["purchase_sales_bn", "cards_in_force_bn", "sales_per_cif_000"]:
@@ -122,7 +118,7 @@ banks_pick = st.multiselect("Banks", banks, default=banks)
 panel = panel[panel["bank"].isin(banks_pick)]
 
 # =========================
-# COEFFICIENT ESTIMATION (UNCHANGED)
+# FIT UPLIFT COEFFICIENTS
 # =========================
 def fit_uplift(panel_bank):
     g = panel_bank.copy()
@@ -154,22 +150,12 @@ def fit_uplift(panel_bank):
 
 alpha, beta_cif, beta_spc = fit_uplift(panel)
 
-st.markdown(
-f"""
-**Coefficients (pooled):**  
-- α (Intercept): **{alpha:.4f}**  
-- β CIF: **{beta_cif:.4f}**  
-- β Sales/CIF: **{beta_spc:.4f}**
-"""
-)
-
 # =========================
-# METHOD C PROJECTION
+# METHOD C PROJECTION (WITH CIF & SPC LEVELS)
 # =========================
 def project_method_C(gb):
     last_per = gb["quarter_dt"].max().to_period("Q")
     H = (TARGET_END.year - last_per.year) * 4 + (TARGET_END.quarter - last_per.quarter)
-
     if H <= 0:
         return pd.DataFrame()
 
@@ -209,10 +195,12 @@ def project_method_C(gb):
 
         rows.append({
             "bank": gb.iloc[0]["bank"],
+            "quarter": str(t),
             "quarter_dt": t.to_timestamp(how="end"),
-            "quarter": str(t),  # used only internally
-            "value": ps,
-            "scenario": "Method C"
+            "purchase_sales_bn": ps,
+            "cards_in_force_bn": cif,
+            "sales_per_cif_000": spc,
+            "scenario": "Method C",
         })
 
     return pd.DataFrame(rows)
@@ -229,15 +217,17 @@ for b in banks_pick:
 proj = pd.concat(proj_frames, ignore_index=True) if proj_frames else pd.DataFrame()
 
 # =========================
-# CHART — RAW QUARTER LABELS
+# CHART — PS LINE, CIF & SPC IN TOOLTIP
 # =========================
 hist = panel.assign(
-    value=panel["purchase_sales_bn"],
     scenario="Actual"
-)[["bank", "quarter", "quarter_dt", "value", "scenario"]]
-
-proj = proj[["bank", "quarter_dt", "value", "scenario"]]
-proj["quarter"] = proj["quarter_dt"].dt.to_period("Q").astype(str)
+)[
+    ["bank", "quarter", "quarter_dt",
+     "purchase_sales_bn",
+     "cards_in_force_bn",
+     "sales_per_cif_000",
+     "scenario"]
+]
 
 plot_df = pd.concat([hist, proj], ignore_index=True)
 
@@ -250,7 +240,7 @@ chart = (
             sort=alt.SortField("quarter_dt", "ascending"),
             title="Quarter"
         ),
-        y=alt.Y("value:Q", title="Purchase Sales (Bn)"),
+        y=alt.Y("purchase_sales_bn:Q", title="Purchase Sales (Bn)"),
         color=alt.Color(
             "bank:N",
             scale=alt.Scale(
@@ -263,7 +253,14 @@ chart = (
             alt.value([0]),
             alt.value([6, 4])
         ),
-        tooltip=["bank", "quarter", "value", "scenario"]
+        tooltip=[
+            "bank",
+            "quarter",
+            alt.Tooltip("purchase_sales_bn:Q", title="Purchase Sales (Bn)", format=",.2f"),
+            alt.Tooltip("cards_in_force_bn:Q", title="Cards in Force (Bn)", format=",.2f"),
+            alt.Tooltip("sales_per_cif_000:Q", title="Sales / CIF ('000)", format=",.2f"),
+            "scenario"
+        ]
     )
     .properties(height=420)
 )
