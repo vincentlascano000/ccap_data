@@ -100,7 +100,13 @@ K = st.sidebar.slider("Rolling same‑quarter window (K)", 3, 8, 6)
 raw = pd.read_csv(RAW_URL)
 df = apply_header_map(raw)
 
-df["quarter_dt"] = df["quarter"].apply(parse_quarter)
+
+# Make quarter_dt only if needed (robust to mixed formats)
+if "quarter_dt" not in df.columns:
+    parsed = df["quarter"].apply(
+        lambda x: parse_quarter(x) if pd.notna(x) else pd.NaT
+    )
+    df["quarter_dt"] = parsed
 for c in ["purchase_sales_bn", "cards_in_force_bn", "sales_per_cif_000"]:
     df[c] = pd.to_numeric(df[c], errors="coerce")
 
