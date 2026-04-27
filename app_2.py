@@ -186,7 +186,10 @@ def project_method_C(bank_df):
         })
 
     return pd.DataFrame(rows)
-pick:
+
+proj_frames = []
+
+for b in banks_pick:
     gb = panel[panel["bank"] == b]
     if gb.shape[0] < 3:
         continue
@@ -196,6 +199,7 @@ pick:
         proj_frames.append(pc)
 
 proj = pd.concat(proj_frames, ignore_index=True) if proj_frames else pd.DataFrame()
+
 
 
 # =========================
