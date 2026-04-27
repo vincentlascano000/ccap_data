@@ -68,30 +68,38 @@ scenario_adj = (scenario_shift_ppt / 100) * (
 K = st.sidebar.slider("Rolling same‑quarter window (K)", 3, 8, 6)
 
 # =========================
-# LOAD DATA (RESTORED HEADER MAPPING)
+# LOAD DATA (FINAL, EXACT FOR YOUR FILE)
 # =========================
 raw = pd.read_csv(RAW_URL, engine="python")
 
-# Normalize headers exactly like the original A/B/C file
-raw.columns = (
-    raw.columns
-       .str.strip()
-       .str.lower()
-       .str.replace(r"[()']", "", regex=True)
-       .str.replace("/", " ")
-       .str.replace("  ", " ")
-       .str.replace(" ", "_")
-)
+# ✅ Explicit column rename from YOUR real headers
+raw = raw.rename(columns={
+    "QUARTER": "quarter",
+    "BANK": "bank",
+    "Purchase Sales (in Bn)": "purchase_sales_bn",
+    "Cards in Force (in Bn)": "cards_in_force_bn",
+    "Sales / CIF ('000)": "sales_per_cif_000",
+})
 
-# Now these columns DEFINITELY exist
-# purchase_sales_bn
-# cards_in_force_bn
-# sales_per_cif_000
+# ✅ Keep only columns actually used by Method C
+raw = raw[
+    ["quarter", "bank",
+     "purchase_sales_bn",
+     "cards_in_force_bn",
+     "sales_per_cif_000"]
+]
 
-# Parse quarter (1Q23 format)
+# ✅ Parse quarter (your data is always like 1Q23)
+def parse_quarter(value):
+    value = str(value).strip().upper()   # e.g. 1Q23
+    q = int(value[0])
+    yy = int(value[2:])
+    year = 2000 + yy
+    return pd.Period(year=year, quarter=q, freq="Q").to_timestamp(how="end")
+
 raw["quarter_dt"] = raw["quarter"].apply(parse_quarter)
 
-# Coerce numerics (this will no longer crash)
+# ✅ Numeric coercion (now guaranteed safe)
 for c in ["purchase_sales_bn", "cards_in_force_bn", "sales_per_cif_000"]:
     raw[c] = pd.to_numeric(raw[c], errors="coerce")
 
