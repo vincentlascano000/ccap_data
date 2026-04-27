@@ -243,6 +243,10 @@ def project_method_c(gb):
 # CHART — PS only, with CIF & Sales/CIF in tooltip
 # =========================
 
+# =========================
+# CHART — PS line, CIF & SPC in tooltip (actuals only)
+# =========================
+
 # --- Historical (Actuals) ---
 hist_plot = (
     panel
@@ -255,7 +259,7 @@ hist_plot = (
     [["bank", "quarter_dt", "value", "cif", "spc", "scenario"]]
 )
 
-# --- Projections (Method C) ---
+# --- Projections (Method C: PS only) ---
 proj_plot = pd.concat(
     [
         project_method_c(panel[panel["bank"] == b])
@@ -269,10 +273,9 @@ proj_plot["quarter_dt"] = proj_plot["quarter"].apply(
     lambda q: pd.Period(q, freq="Q").to_timestamp(how="end")
 )
 
-proj_plot = proj_plot.rename(columns={
-    "projected_cif_bn": "cif",
-    "projected_sales_per_cif_000": "spc"
-})
+# ✅ Explicitly add empty CIF / SPC columns for projections
+proj_plot["cif"] = np.nan
+proj_plot["spc"] = np.nan
 
 proj_plot = proj_plot[["bank", "quarter_dt", "value", "cif", "spc", "scenario"]]
 
