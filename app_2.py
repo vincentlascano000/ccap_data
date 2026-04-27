@@ -186,42 +186,58 @@ with st.expander("Uplift coefficients", expanded=True):
 # =========================
 def project_method_c(gb):
     gb = gb.sort_values("quarter_dt").copy()
-    last = gb["quarter_dt"].max().to_period("Q")
-    H = (TARGET_END.year - last.year) * 4 + (TARGET_END.quarter - last.quarter)
+    last_dt = gb["quarter_dt"].max()
+    last_per = last_dt.to_period("Q")
+    H = (TARGET_END.year - last_per.year) * 4 + (TARGET_END.quarter - last_per.quarter)
+
     if H <= 0:
         return pd.DataFrame()
 
+    # Historical same-quarter QoQ factor pools
     hist_ps = qoq_factors_by_quarter(gb["purchase_sales_bn"], gb["quarter_dt"])
     hist_cif = qoq_factors_by_quarter(gb["cards_in_force_bn"], gb["quarter_dt"])
     hist_spc = qoq_factors_by_quarter(gb["sales_per_cif_000"], gb["quarter_dt"])
 
+    # Forecasted factor pools (to enable true rolling)
     fore_ps = {q: [] for q in range(1, 5)}
     fore_cif = {q: [] for q in range(1, 5)}
     fore_spc = {q: [] for q in range(1, 5)}
 
+    # Starting levels (last actuals)
     ps = gb.iloc[-1]["purchase_sales_bn"]
     cif = gb.iloc[-1]["cards_in_force_bn"]
     spc = gb.iloc[-1]["sales_per_cif_000"]
 
     rows = []
+
     for h in range(1, H + 1):
-        t = last + h
+        t = last_per + h
         q = t.quarter
 
-        base_ps = np.mean((hist_ps[q] + fore_ps[q])[-K:]) if (hist_ps[q] + fore_ps[q]) else 1
-        g_base = base_ps - 1
+        # --- Baseline PS growth (same-quarter, rolling) ---
+        pool_ps = hist_ps[q] + fore_ps[q]
+        base_ps = np.mean(pool_ps[-K:]) if pool_ps else 1.0
+        g_base = base_ps - 1.0
 
-        d_cif = (np.mean((hist_cif[q] + fore_cif[q])[-K:]) - 1) if (hist_cif[q] + fore_cif[q]) else 0
-        d_spc = (np.mean((hist_spc[q] + fore_spc[q])[-K:]) - 1) if (hist_spc[q] + fore_spc[q]) else 0
+        # --- CIF growth ---
+        pool_cif = hist_cif[q] + fore_cif[q]
+        d_cif = (np.mean(pool_cif[-K:]) - 1.0) if pool_cif else 0.0
 
+        # --- SPC growth ---
+        pool_spc = hist_spc[q] + fore_spc[q]
+        d_spc = (np.mean(pool_spc[-K:]) - 1.0) if pool_spc else 0.0
+
+        # --- PS uplift ---
         uplift = alpha + beta_cif * d_cif + beta_spc * d_spc
-        g_total = g_base + uplift + scenario_adj
+        g_total_ps = g_base + uplift + scenario_adj
 
+        # --- Update levels ---
         prev_ps = ps
-        ps *= (1 + g_total)
+        ps *= (1 + g_total_ps)
         cif *= (1 + d_cif)
         spc *= (1 + d_spc)
 
+        # --- Feed realized factors into rolling pools ---
         fore_ps[q].append(ps / prev_ps)
         fore_cif[q].append(1 + d_cif)
         fore_spc[q].append(1 + d_spc)
@@ -230,7 +246,9 @@ def project_method_c(gb):
             "bank": gb.iloc[0]["bank"],
             "quarter": str(t),
             "value": ps,
-            "scenario": "Method C"
+            "projected_cif_bn": cif,
+            "projected_sales_per_cif_000": spc,
+            "scenario": "Method C",
         })
 
     return pd.DataFrame(rows)
