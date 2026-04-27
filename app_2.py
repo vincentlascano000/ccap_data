@@ -225,6 +225,7 @@ hist = panel.assign(
 
 plot_df = pd.concat([hist, proj], ignore_index=True)
 
+
 plot_df["quarter_label"] = plot_df["quarter_label"].where(
     plot_df["quarter_label"].notna(),
     plot_df["quarter_dt"]
@@ -233,7 +234,8 @@ plot_df["quarter_label"] = plot_df["quarter_label"].where(
 )
 
 # Defensive: eliminate string 'None' if any survived casting
-plot_df["quarter_label"] = plot_df["quarter_label"].replace("None", 
+plot_df["quarter_label"] = plot_df["quarter_label"].replace("None", "")
+ 
 
 
 # Safety check – impossible to show "none"
