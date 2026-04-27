@@ -233,7 +233,15 @@ proj = pd.concat(
 hist = panel.assign(scenario="Actual")
 plot_df = pd.concat([hist, proj], ignore_index=True)
 
-plot_df["quarter_label"] = plot_df["quarter_dt"].apply(format_quarter_label)
+
+plot_df["quarter_label"] = (
+    plot_df["quarter_dt"]
+    .apply(lambda x: format_quarter_label(x) if pd.notna(x) else None)
+)
+
+# Defensive cleanup (prevents Altair "non")
+plot_df = plot_df.dropna(subset=["quarter_label"])
+plot_df["quarter_label"] = plot_df["quarter_label"].a
 
 chart = (
     alt.Chart(plot_df)
