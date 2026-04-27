@@ -238,11 +238,19 @@ def project_method_c(gb):
 # =========================
 # RUN & CHART
 # =========================
-hist = panel.assign(scenario="Actual", value=panel["purchase_sales_bn"])
-proj = pd.concat(
-    [project_method_c(panel[panel["bank"] == b]) for b in banks_pick],
-    ignore_index=True
+# --- Ensure historical data has quarter_dt ---
+hist_plot = hist[["bank", "quarter_dt", "value", "scenario"]].copy()
+
+# --- Create quarter_dt for projections ---
+proj_plot = proj.copy()
+proj_plot["quarter_dt"] = proj_plot["quarter"].apply(
+    lambda x: pd.Period(x, freq="Q").to_timestamp(how="end")
 )
+
+proj_plot = proj_plot[["bank", "quarter_dt", "value", "scenario"]]
+
+# --- Combine ---
+plot_df = pd.concat([hist_plot, proj_plot], ignore_index=True)
 
 
 plot_df["quarter_label"] = (
@@ -252,6 +260,7 @@ plot_df["quarter_label"] = (
     .str.replace("Q", "-Q")
 )
 
+
 chart = (
     alt.Chart(plot_df)
     .mark_line(point=True)
@@ -259,10 +268,7 @@ chart = (
         x=alt.X(
             "quarter_label:N",
             title="Quarter",
-            sort=alt.SortField(
-                field="quarter_dt",
-                order="ascending"
-            )
+            sort=alt.SortField(field="quarter_dt", order="ascending")
         ),
         y=alt.Y("value:Q", title="Purchase Sales"),
         color=alt.Color(
