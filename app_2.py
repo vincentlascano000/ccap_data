@@ -239,20 +239,23 @@ def project_method_c(gb):
 # RUN & CHART
 # =========================
 # --- Ensure historical data has quarter_dt ---
+# =========================
+# CHART — Quarter labels as YYYY-Q#
+# =========================
+
+# Ensure both historical and projected data have quarter_dt
 hist_plot = hist[["bank", "quarter_dt", "value", "scenario"]].copy()
 
-# --- Create quarter_dt for projections ---
 proj_plot = proj.copy()
 proj_plot["quarter_dt"] = proj_plot["quarter"].apply(
     lambda x: pd.Period(x, freq="Q").to_timestamp(how="end")
 )
-
 proj_plot = proj_plot[["bank", "quarter_dt", "value", "scenario"]]
 
-# --- Combine ---
+# Combine
 plot_df = pd.concat([hist_plot, proj_plot], ignore_index=True)
 
-
+# Create formatted quarter labels (e.g. 2026-Q1)
 plot_df["quarter_label"] = (
     plot_df["quarter_dt"]
     .dt.to_period("Q")
@@ -260,7 +263,7 @@ plot_df["quarter_label"] = (
     .str.replace("Q", "-Q")
 )
 
-
+# Build chart
 chart = (
     alt.Chart(plot_df)
     .mark_line(point=True)
@@ -281,8 +284,8 @@ chart = (
         ),
         strokeDash=alt.condition(
             alt.datum.scenario == "Actual",
-            alt.value([0]),
-            alt.value([6, 4])
+            alt.value([0]),        # solid
+            alt.value([6, 4])      # dashed
         ),
         tooltip=["bank", "quarter_label", "value", "scenario"]
     )
@@ -290,3 +293,4 @@ chart = (
 )
 
 st.altair_chart(chart, use_container_width=True)
+
