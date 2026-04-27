@@ -106,32 +106,15 @@ for c in ["purchase_sales_bn", "cards_in_force_bn", "sales_per_cif_000"]:
 # =========================
 # FIT COEFFICIENTS (UNCHANGED)
 # =========================
-def fit_uplift(panel):
-    g = panel.copy()
-    g["qtr"] = g["quarter_dt"].dt.to_period("Q").apply(lambda p: p.quarter)
 
-    g["d_ps"]  = g.groupby("bank")["purchase_sales_bn"].pct_change()
-    g["d_cif"] = g.groupby("bank")["cards_in_force_bn"].pct_change()
-    g["d_spc"] = g.groupby("bank")["sales_per_cif_000"].pct_change()
+beta, *_ = np.linalg.lstsq(X, y, rcond=None)
 
-    bases = []
-    for b, gb in g.groupby("bank"):
-        pools = {1: [], 2: [], 3: [], 4: []}
-        base = []
-        for _, r in gb.iterrows():
-            base.append(np.mean(pools[r["qtr"]]) if pools[r["qtr"]] else np.nan)
-            if pd.notna(r["d_ps"]):
-                pools[r["qtr"]].append(r["d_ps"])
-        bases.append(pd.Series(base, index=gb.index))
+alpha    = float(beta[0])
+beta_cif = float(beta[1])
+beta_spc = float(beta[2])
 
-    g["g_base"] = pd.concat(bases).sort_index()
-    g["r_ps"] = g["d_ps"] - g["g_base"]
+return alpha, beta_cif, beta_spc
 
-    fit = g.dropna(subset=["r_ps", "d_cif", "d_spc"])
-    X = np.column_stack([np.ones(len(fit)), fit["d_cif"], fit["d_spc"]])
-    y = fit["r_ps"].values
-    beta, *_ = np.linalg.lstsq(X, y, rcond=None)
-    return beta
 
 alpha, beta_cif, beta_spc = fit_uplift(panel)
 
