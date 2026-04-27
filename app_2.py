@@ -68,29 +68,32 @@ scenario_adj = (scenario_shift_ppt / 100) * (
 K = st.sidebar.slider("Rolling same‑quarter window (K)", 3, 8, 6)
 
 # =========================
-# LOAD DATA
+# LOAD DATA (RESTORED HEADER MAPPING)
 # =========================
-raw = pd.read_csv(RAW_URL)
+raw = pd.read_csv(RAW_URL, engine="python")
 
-# Normalize headers
-raw.columns = [c.strip().lower().replace(" ", "_") for c in raw.columns]
-
-raw["quarter_dt"] = raw["quarter"].apply(parse_quarter)
-
-for c in ["purchase_sales_bn", "cards_in_force_bn", "sales_per_cif_000"]:
-    raw[c] = pd.to_numeric(raw[c], errors="coerce")
-
-panel = (
-    raw[["bank", "quarter_dt", "purchase_sales_bn", "cards_in_force_bn", "sales_per_cif_000"]]
-    .dropna()
-    .sort_values(["bank", "quarter_dt"])
+# Normalize headers exactly like the original A/B/C file
+raw.columns = (
+    raw.columns
+       .str.strip()
+       .str.lower()
+       .str.replace(r"[()']", "", regex=True)
+       .str.replace("/", " ")
+       .str.replace("  ", " ")
+       .str.replace(" ", "_")
 )
 
-banks = sorted(panel["bank"].unique(),
-               key=lambda b: BANK_ORDER_PREF.index(b) if b in BANK_ORDER_PREF else 999)
+# Now these columns DEFINITELY exist
+# purchase_sales_bn
+# cards_in_force_bn
+# sales_per_cif_000
 
-banks_pick = st.multiselect("Banks", banks, default=banks)
-panel = panel[panel["bank"].isin(banks_pick)]
+# Parse quarter (1Q23 format)
+raw["quarter_dt"] = raw["quarter"].apply(parse_quarter)
+
+# Coerce numerics (this will no longer crash)
+for c in ["purchase_sales_bn", "cards_in_force_bn", "sales_per_cif_000"]:
+    raw[c] = pd.to_numeric(raw[c], errors="coerce")
 
 # =========================
 # FIT COEFFICIENTS (UNCHANGED)
