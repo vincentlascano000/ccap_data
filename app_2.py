@@ -20,8 +20,8 @@ REGIME_SHIFT_PPT = 6.0  # permanent regime correction
 
 # One-time level re-anchor (non-compounding)
 ONE_TIME_REANCHOR = {
-    "BDO": 1.030,  # +2.5%
-    "BPI": 1.025,  # +2.0%
+    "BDO": 1.050,  # +2.5%
+    "BPI": 1.055,  # +2.0%
 }
 
 BANK_COLORS = {
