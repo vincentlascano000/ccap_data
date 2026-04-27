@@ -1,8 +1,8 @@
 # app_2.py
 # CCAP — Method C ONLY
-# Regime-corrected intercept + ONE-TIME re-anchor for BDO/BPI
+# Regime-corrected intercept + ONE-TIME re-anchor for BDO & BPI
 # Uniform quarter labels (#QYY)
-# PS, CIF, SPC projected
+# Robust quarter parsing (no crashes)
 
 import numpy as np
 import pandas as pd
@@ -17,14 +17,13 @@ st.set_page_config(page_title="CCAP — Method C", layout="wide")
 RAW_URL = "https://raw.githubusercontent.com/vincentlascano000/ccap_data/main/CCAP_DATA.csv"
 TARGET_END = pd.Period("2028Q4", freq="Q")
 
-REGIME_SHIFT_PPT = 6.0   # permanent regime correction
-LARGE_BANKS = {"BDO", "BPI"}
+# Regime correction
+REGIME_SHIFT_PPT = 6.0
 
-# One-time level re-anchor factors (empirically implied)
-# Roughly equivalent to +8–10 bn at 2026Q1 base
+# One-time re-anchor (LEVEL adjustment only)
 ONE_TIME_REANCHOR = {
-    "BDO": 1.025,   # +2.5%
-    "BPI": 1.020,   # +2.0%
+    "BDO": 1.025,  # +2.5%
+    "BPI": 1.020,  # +2.0%
 }
 
 BANK_COLORS = {
@@ -37,16 +36,48 @@ BANK_COLORS = {
 }
 
 # =========================
-# HELPERS
+# ROBUST QUARTER PARSER
 # =========================
-def parse_quarter_dt(q):
-    q = str(q).strip().upper()
-    return pd.Period(2000 + int(q[2:]), int(q[0]), freq="Q").to_timestamp(how="end")
+def parse_quarter_dt(value):
+    """
+    Safely parses:
+      - '1Q23', '4Q25'
+      - '2026Q1'
+      - 'Q1 2026'
+      - Periods / timestamps
+    Returns quarter-end Timestamp.
+    """
+    if pd.isna(value):
+        return pd.NaT
+
+    s = str(value).strip().upper().replace(" ", "")
+
+    # 1Q23 / 4Q25
+    if s[0].isdigit() and "Q" in s and len(s) in (4,5):
+        q = int(s[0])
+        yr = int(s[2:])
+        yr = 2000 + yr if yr < 100 else yr
+        return pd.Period(year=yr, quarter=q, freq="Q").to_timestamp(how="end")
+
+    # 2026Q1
+    if len(s) == 6 and s[:4].isdigit():
+        yr = int(s[:4])
+        q = int(s[-1])
+        return pd.Period(year=yr, quarter=q, freq="Q").to_timestamp(how="end")
+
+    # Fallback: date-like
+    try:
+        return pd.to_datetime(s).to_period("Q").to_timestamp(how="end")
+    except Exception:
+        return pd.NaT
 
 def format_quarter_label(dt):
     p = dt.to_period("Q")
     return f"{p.quarter}Q{str(p.year)[-2:]}"
 
+# =========================
+# QoQ FACTORS
+# =========================
 def qoq_factors_by_quarter(series, quarter_dt):
     per = quarter_dt.dt.to_period("Q")
     s = pd.Series(series.values, index=per).sort_index()
@@ -74,13 +105,24 @@ raw = pd.read_csv(RAW_URL, engine="python").rename(columns={
     "Sales / CIF ('000)": "sales_per_cif_000",
 })
 
-raw = raw[["quarter","bank","purchase_sales_bn","cards_in_force_bn","sales_per_cif_000"]]
+raw = raw[
+    ["quarter", "bank",
+     "purchase_sales_bn",
+     "cards_in_force_bn",
+     "sales_per_cif_000"]
+]
+
 raw["quarter_dt"] = raw["quarter"].apply(parse_quarter_dt)
 
-for c in ["purchase_sales_bn","cards_in_force_bn","sales_per_cif_000"]:
+for c in ["purchase_sales_bn", "cards_in_force_bn", "sales_per_cif_000"]:
     raw[c] = pd.to_numeric(raw[c], errors="coerce")
 
-panel = raw.dropna().sort_values(["bank","quarter_dt"]).reset_index(drop=True)
+panel = (
+    raw.dropna()
+       .sort_values(["bank", "quarter_dt"])
+       .reset_index(drop=True)
+)
+
 banks = panel["bank"].unique().tolist()
 banks_pick = st.multiselect("Banks", banks, default=banks)
 panel = panel[panel["bank"].isin(banks_pick)]
@@ -91,6 +133,7 @@ panel = panel[panel["bank"].isin(banks_pick)]
 def fit_uplift(panel_bank):
     g = panel_bank.copy()
     g["q"] = g["quarter_dt"].dt.to_period("Q").dt.quarter
+
     g["d_ps"]  = g.groupby("bank")["purchase_sales_bn"].pct_change()
     g["d_cif"] = g.groupby("bank")["cards_in_force_bn"].pct_change()
     g["d_spc"] = g.groupby("bank")["sales_per_cif_000"].pct_change()
@@ -107,15 +150,16 @@ def fit_uplift(panel_bank):
 
     g["g_base"] = pd.concat(bases).sort_index()
     g["r_ps"] = g["d_ps"] - g["g_base"]
-    fit = g.dropna(subset=["r_ps","d_cif","d_spc"])
 
+    fit = g.dropna(subset=["r_ps","d_cif","d_spc"])
     X = np.column_stack([np.ones(len(fit)), fit["d_cif"], fit["d_spc"]])
     y = fit["r_ps"].values
+
     beta, *_ = np.linalg.lstsq(X, y, rcond=None)
     return beta[0], beta[1], beta[2]
 
 alpha_raw, beta_cif, beta_spc = fit_uplift(panel)
-alpha = alpha_raw + REGIME_SHIFT_PPT / 100   # ✅ permanent regime shift
+alpha = alpha_raw + REGIME_SHIFT_PPT / 100  # ✅ permanent regime shift
 
 # =========================
 # METHOD C — ONE-TIME RE-ANCHOR
@@ -123,19 +167,24 @@ alpha = alpha_raw + REGIME_SHIFT_PPT / 100   # ✅ permanent regime shift
 def project_method_C(gb):
     last = gb["quarter_dt"].max().to_period("Q")
     H = (TARGET_END.year-last.year)*4 + (TARGET_END.quarter-last.quarter)
+    if H <= 0:
+        return pd.DataFrame()
 
     hist_ps  = qoq_factors_by_quarter(gb["purchase_sales_bn"], gb["quarter_dt"])
     hist_cif = qoq_factors_by_quarter(gb["cards_in_force_bn"], gb["quarter_dt"])
     hist_spc = qoq_factors_by_quarter(gb["sales_per_cif_000"], gb["quarter_dt"])
 
-    fore_ps, fore_cif, fore_spc = ({q:[] for q in range(1,5)} for _ in range(3))
+    fore_ps = {q:[] for q in range(1,5)}
+    fore_cif = {q:[] for q in range(1,5)}
+    fore_spc = {q:[] for q in range(1,5)}
 
     ps  = gb.iloc[-1]["purchase_sales_bn"]
     cif = gb.iloc[-1]["cards_in_force_bn"]
     spc = gb.iloc[-1]["sales_per_cif_000"]
     bank = gb.iloc[0]["bank"]
 
-    rows, anchored = [], False
+    rows = []
+    anchored = False
 
     for h in range(1, H+1):
         t = last + h
@@ -149,7 +198,7 @@ def project_method_C(gb):
         g_ps = g_base + (alpha + beta_cif*d_cif + beta_spc*d_spc)
         ps *= (1 + g_ps)
 
-        # ✅ ONE-TIME LEVEL RE-ANCHOR
+        # ✅ One-time level re-anchor
         if not anchored and bank in ONE_TIME_REANCHOR:
             ps *= ONE_TIME_REANCHOR[bank]
             anchored = True
@@ -163,11 +212,11 @@ def project_method_C(gb):
 
         rows.append({
             "bank": bank,
-            "quarter_dt": t.to_timestamp("end"),
+            "quarter_dt": t.to_timestamp(how="end"),
             "purchase_sales_bn": ps,
             "cards_in_force_bn": cif,
             "sales_per_cif_000": spc,
-            "scenario": "Method C"
+            "scenario": "Method C",
         })
 
     return pd.DataFrame(rows)
@@ -183,20 +232,35 @@ proj = pd.concat(
 # =========================
 hist = panel.assign(scenario="Actual")
 plot_df = pd.concat([hist, proj], ignore_index=True)
+
 plot_df["quarter_label"] = plot_df["quarter_dt"].apply(format_quarter_label)
 
 chart = (
     alt.Chart(plot_df)
     .mark_line(point=True)
     .encode(
-        x=alt.X("quarter_label:N", sort=alt.SortField("quarter_dt"), title="Quarter"),
-        y=alt.Y("purchase_sales_bn:Q", title="Purchase Sales (Bn)"),
-        color=alt.Color("bank:N", scale=alt.Scale(
-            domain=list(BANK_COLORS.keys()),
-            range=list(BANK_COLORS.values())
-        )),
-        strokeDash=alt.condition(alt.datum.scenario=="Actual", alt.value([0]), alt.value([6,4])),
-        tooltip=["bank","quarter_label","purchase_sales_bn","cards_in_force_bn","sales_per_cif_000"]
+        x=alt.X("quarter_label:N",
+                sort=alt.SortField("quarter_dt"),
+                title="Quarter"),
+        y=alt.Y("purchase_sales_bn:Q",
+                title="Purchase Sales (Bn)"),
+        color=alt.Color(
+            "bank:N",
+            scale=alt.Scale(domain=list(BANK_COLORS.keys()),
+                            range=list(BANK_COLORS.values()))
+        ),
+        strokeDash=alt.condition(
+            alt.datum.scenario=="Actual",
+            alt.value([0]),
+            alt.value([6,4])
+        ),
+        tooltip=[
+            "bank",
+            "quarter_label",
+            "purchase_sales_bn",
+            "cards_in_force_bn",
+            "sales_per_cif_000"
+        ]
     )
     .properties(height=420)
 )
