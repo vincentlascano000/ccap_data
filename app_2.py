@@ -20,7 +20,7 @@ REGIME_SHIFT_PPT = 5.90  # permanent regime correction
 
 # One-time level re-anchor (non-compounding)
 ONE_TIME_REANCHOR = {
-    "BDO": 1.053,  # +2.5%
+    "BDO": 1.055,  # +2.5%
     "BPI": 1.055,  # +2.0%
 }
 
