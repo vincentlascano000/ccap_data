@@ -16,11 +16,11 @@ st.set_page_config(page_title="CCAP — Method C", layout="wide")
 RAW_URL = "https://raw.githubusercontent.com/vincentlascano000/ccap_data/main/CCAP_DATA.csv"
 TARGET_END = pd.Period("2028Q4", freq="Q")
 
-REGIME_SHIFT_PPT = 5.95  # permanent regime correction
+REGIME_SHIFT_PPT = 5.90  # permanent regime correction
 
 # One-time level re-anchor (non-compounding)
 ONE_TIME_REANCHOR = {
-    "BDO": 1.050,  # +2.5%
+    "BDO": 1.053,  # +2.5%
     "BPI": 1.055,  # +2.0%
 }
 
