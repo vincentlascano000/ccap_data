@@ -18,7 +18,7 @@ RAW_URL = "https://raw.githubusercontent.com/vincentlascano000/ccap_data/main/CC
 TARGET_END = pd.Period("2028Q4", freq="Q")
 
 # Regime correction
-REGIME_SHIFT_PPT = 6.0
+REGIME_SHIFT_PPT = 5.5
 
 # One-time re-anchor (LEVEL adjustment only)
 ONE_TIME_REANCHOR = {
