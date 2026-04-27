@@ -239,16 +239,23 @@ def project_method_c(gb):
 # RUN & CHART
 # =========================
 # --- Build historical actuals ---
+# =========================
+# CHART — PS only, with CIF & Sales/CIF in tooltip
+# =========================
+
+# --- Historical (Actuals) ---
 hist_plot = (
     panel
     .assign(
         value=lambda d: d["purchase_sales_bn"],
+        cif=lambda d: d["cards_in_force_bn"],
+        spc=lambda d: d["sales_per_cif_000"],
         scenario="Actual"
     )
-    [["bank", "quarter_dt", "value", "scenario"]]
+    [["bank", "quarter_dt", "value", "cif", "spc", "scenario"]]
 )
 
-# --- Build projections locally (Method C) ---
+# --- Projections (Method C) ---
 proj_plot = pd.concat(
     [
         project_method_c(panel[panel["bank"] == b])
@@ -262,12 +269,17 @@ proj_plot["quarter_dt"] = proj_plot["quarter"].apply(
     lambda q: pd.Period(q, freq="Q").to_timestamp(how="end")
 )
 
-proj_plot = proj_plot[["bank", "quarter_dt", "value", "scenario"]]
+proj_plot = proj_plot.rename(columns={
+    "projected_cif_bn": "cif",
+    "projected_sales_per_cif_000": "spc"
+})
 
-# --- Combine actuals + projections ---
+proj_plot = proj_plot[["bank", "quarter_dt", "value", "cif", "spc", "scenario"]]
+
+# --- Combine ---
 plot_df = pd.concat([hist_plot, proj_plot], ignore_index=True)
 
-# --- Create formatted quarter labels (e.g., 2026-Q1) ---
+# --- Quarter labels ---
 plot_df["quarter_label"] = (
     plot_df["quarter_dt"]
     .dt.to_period("Q")
@@ -283,12 +295,9 @@ chart = (
         x=alt.X(
             "quarter_label:N",
             title="Quarter",
-            sort=alt.SortField(
-                field="quarter_dt",
-                order="ascending"
-            )
+            sort=alt.SortField(field="quarter_dt", order="ascending")
         ),
-        y=alt.Y("value:Q", title="Purchase Sales"),
+        y=alt.Y("value:Q", title="Purchase Sales (Bn)"),
         color=alt.Color(
             "bank:N",
             scale=alt.Scale(
@@ -299,10 +308,17 @@ chart = (
         ),
         strokeDash=alt.condition(
             alt.datum.scenario == "Actual",
-            alt.value([0]),      # solid
-            alt.value([6, 4])    # dashed
+            alt.value([0]),
+            alt.value([6, 4])
         ),
-        tooltip=["bank", "quarter_label", "value", "scenario"]
+        tooltip=[
+            alt.Tooltip("bank:N", title="Bank"),
+            alt.Tooltip("quarter_label:N", title="Quarter"),
+            alt.Tooltip("value:Q", title="Purchase Sales (Bn)", format=",.2f"),
+            alt.Tooltip("cif:Q", title="Cards in Force (Bn)", format=",.2f"),
+            alt.Tooltip("spc:Q", title="Sales / CIF ('000)", format=",.2f"),
+            alt.Tooltip("scenario:N", title="Type"),
+        ]
     )
     .properties(height=420)
 )
