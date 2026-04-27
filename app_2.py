@@ -238,17 +238,6 @@ def project_method_c(gb):
 # =========================
 # RUN & CHART
 # =========================
-# --- Ensure historical data has quarter_dt ---
-# =========================
-# =========================
-# CHART — Quarter labels as YYYY-Q#
-# =========================
-
-# =========================
-# CHART — Quarter labels as YYYY-Q#
-# (self-contained, no dependency on pre-existing `proj`)
-# =========================
-
 # --- Build historical actuals ---
 hist_plot = (
     panel
