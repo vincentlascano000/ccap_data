@@ -186,11 +186,17 @@ def project_method_C(bank_df):
         })
 
     return pd.DataFrame(rows)
+pick:
+    gb = panel[panel["bank"] == b]
+    if gb.shape[0] < 3:
+        continue
 
-proj = pd.concat(
-    [project_method_C(panel[panel["bank"] == b]) for b in banks_pick],
-    ignore_index=True
-)
+    pc = project_method_C(gb)
+    if not pc.empty:
+        proj_frames.append(pc)
+
+proj = pd.concat(proj_frames, ignore_index=True) if proj_frames else pd.DataFrame()
+
 
 # =========================
 # CHART — Method C ONLY (CHANGES APPLIED)
