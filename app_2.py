@@ -244,7 +244,12 @@ def project_method_c(gb):
 # CHART — Quarter labels as YYYY-Q#
 # =========================
 
-# --- Historical (Actuals) ---
+# =========================
+# CHART — Quarter labels as YYYY-Q#
+# (self-contained, no dependency on pre-existing `proj`)
+# =========================
+
+# --- Build historical actuals ---
 hist_plot = (
     panel
     .assign(
@@ -254,17 +259,26 @@ hist_plot = (
     [["bank", "quarter_dt", "value", "scenario"]]
 )
 
-# --- Projections ---
-proj_plot = proj.copy()
-proj_plot["quarter_dt"] = proj_plot["quarter"].apply(
-    lambda x: pd.Period(x, freq="Q").to_timestamp(how="end")
+# --- Build projections locally (Method C) ---
+proj_plot = pd.concat(
+    [
+        project_method_c(panel[panel["bank"] == b])
+        for b in banks_pick
+        if len(panel[panel["bank"] == b]) >= 3
+    ],
+    ignore_index=True
 )
+
+proj_plot["quarter_dt"] = proj_plot["quarter"].apply(
+    lambda q: pd.Period(q, freq="Q").to_timestamp(how="end")
+)
+
 proj_plot = proj_plot[["bank", "quarter_dt", "value", "scenario"]]
 
-# --- Combine ---
+# --- Combine actuals + projections ---
 plot_df = pd.concat([hist_plot, proj_plot], ignore_index=True)
 
-# --- Create formatted quarter labels (e.g. 2026-Q1) ---
+# --- Create formatted quarter labels (e.g., 2026-Q1) ---
 plot_df["quarter_label"] = (
     plot_df["quarter_dt"]
     .dt.to_period("Q")
@@ -272,7 +286,7 @@ plot_df["quarter_label"] = (
     .str.replace("Q", "-Q")
 )
 
-# --- Build chart ---
+# --- Chart ---
 chart = (
     alt.Chart(plot_df)
     .mark_line(point=True)
@@ -280,7 +294,10 @@ chart = (
         x=alt.X(
             "quarter_label:N",
             title="Quarter",
-            sort=alt.SortField(field="quarter_dt", order="ascending")
+            sort=alt.SortField(
+                field="quarter_dt",
+                order="ascending"
+            )
         ),
         y=alt.Y("value:Q", title="Purchase Sales"),
         color=alt.Color(
@@ -302,4 +319,3 @@ chart = (
 )
 
 st.altair_chart(chart, use_container_width=True)
-
