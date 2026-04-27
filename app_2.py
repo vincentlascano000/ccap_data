@@ -1,8 +1,7 @@
 # app_2.py
 # CCAP — Method C ONLY
-# Regime-corrected intercept + ONE-TIME re-anchor for BDO & BPI
-# Uniform quarter labels (#QYY)
-# Robust quarter parsing (no crashes)
+# Regime-corrected + one-time re-anchor (BDO/BPI)
+# Quarter labels are ALWAYS present (no 'none')
 
 import numpy as np
 import pandas as pd
@@ -17,10 +16,9 @@ st.set_page_config(page_title="CCAP — Method C", layout="wide")
 RAW_URL = "https://raw.githubusercontent.com/vincentlascano000/ccap_data/main/CCAP_DATA.csv"
 TARGET_END = pd.Period("2028Q4", freq="Q")
 
-# Regime correction
-REGIME_SHIFT_PPT = 5.5
+REGIME_SHIFT_PPT = 6.0  # permanent regime correction
 
-# One-time re-anchor (LEVEL adjustment only)
+# One-time level re-anchor (non-compounding)
 ONE_TIME_REANCHOR = {
     "BDO": 1.025,  # +2.5%
     "BPI": 1.020,  # +2.0%
@@ -36,44 +34,28 @@ BANK_COLORS = {
 }
 
 # =========================
-# ROBUST QUARTER PARSER
+# QUARTER HELPERS
 # =========================
 def parse_quarter_dt(value):
-    """
-    Safely parses:
-      - '1Q23', '4Q25'
-      - '2026Q1'
-      - 'Q1 2026'
-      - Periods / timestamps
-    Returns quarter-end Timestamp.
-    """
     if pd.isna(value):
         return pd.NaT
-
     s = str(value).strip().upper().replace(" ", "")
 
     # 1Q23 / 4Q25
-    if s[0].isdigit() and "Q" in s and len(s) in (4,5):
+    if s[0].isdigit() and "Q" in s:
         q = int(s[0])
-        yr = int(s[2:])
-        yr = 2000 + yr if yr < 100 else yr
-        return pd.Period(year=yr, quarter=q, freq="Q").to_timestamp(how="end")
+        y = int(s[2:])
+        y = 2000 + y if y < 100 else y
+        return pd.Period(year=y, quarter=q, freq="Q").to_timestamp(how="end")
 
     # 2026Q1
     if len(s) == 6 and s[:4].isdigit():
-        yr = int(s[:4])
-        q = int(s[-1])
-        return pd.Period(year=yr, quarter=q, freq="Q").to_timestamp(how="end")
+        return pd.Period(year=int(s[:4]), quarter=int(s[-1]), freq="Q").to_timestamp(how="end")
 
-    # Fallback: date-like
-    try:
-        return pd.to_datetime(s).to_period("Q").to_timestamp(how="end")
-    except Exception:
-        return pd.NaT
+    return pd.to_datetime(s).to_period("Q").to_timestamp(how="end")
 
-def format_quarter_label(dt):
-    p = dt.to_period("Q")
-    return f"{p.quarter}Q{str(p.year)[-2:]}"
+def period_to_qyy(period):
+    return f"{period.quarter}Q{str(period.year)[-2:]}"
 
 # =========================
 # QoQ FACTORS
@@ -82,6 +64,7 @@ def qoq_factors_by_quarter(series, quarter_dt):
     per = quarter_dt.dt.to_period("Q")
     s = pd.Series(series.values, index=per).sort_index()
     f = (s / s.shift(1)).dropna()
+
     out = {1: [], 2: [], 3: [], 4: []}
     for p, v in f.items():
         if np.isfinite(v) and v > 0:
@@ -123,8 +106,12 @@ panel = (
        .reset_index(drop=True)
 )
 
-banks = panel["bank"].unique().tolist()
-banks_pick = st.multiselect("Banks", banks, default=banks)
+banks_pick = st.multiselect(
+    "Banks",
+    panel["bank"].unique().tolist(),
+    default=panel["bank"].unique().tolist()
+)
+
 panel = panel[panel["bank"].isin(banks_pick)]
 
 # =========================
@@ -159,7 +146,7 @@ def fit_uplift(panel_bank):
     return beta[0], beta[1], beta[2]
 
 alpha_raw, beta_cif, beta_spc = fit_uplift(panel)
-alpha = alpha_raw + REGIME_SHIFT_PPT / 100  # ✅ permanent regime shift
+alpha = alpha_raw + REGIME_SHIFT_PPT / 100
 
 # =========================
 # METHOD C — ONE-TIME RE-ANCHOR
@@ -198,7 +185,7 @@ def project_method_C(gb):
         g_ps = g_base + (alpha + beta_cif*d_cif + beta_spc*d_spc)
         ps *= (1 + g_ps)
 
-        # ✅ One-time level re-anchor
+        # ✅ ONE-TIME LEVEL RE-ANCHOR
         if not anchored and bank in ONE_TIME_REANCHOR:
             ps *= ONE_TIME_REANCHOR[bank]
             anchored = True
@@ -213,6 +200,7 @@ def project_method_C(gb):
         rows.append({
             "bank": bank,
             "quarter_dt": t.to_timestamp(how="end"),
+            "quarter_label": period_to_qyy(t),  # ✅ ALWAYS SET HERE
             "purchase_sales_bn": ps,
             "cards_in_force_bn": cif,
             "sales_per_cif_000": spc,
@@ -222,39 +210,43 @@ def project_method_C(gb):
     return pd.DataFrame(rows)
 
 proj = pd.concat(
-    [project_method_C(panel[panel["bank"]==b]) for b in banks_pick
-     if panel[panel["bank"]==b].shape[0] >= 3],
+    [project_method_C(panel[panel["bank"] == b]) for b in banks_pick
+     if panel[panel["bank"] == b].shape[0] >= 3],
     ignore_index=True
 )
 
 # =========================
-# CHART
+# CHART DATA (ACTUALS + PROJECTIONS)
 # =========================
-hist = panel.assign(scenario="Actual")
-plot_df = pd.concat([hist, proj], ignore_index=True)
-
-plot_df["quarter_label"] = (
-    plot_df["quarter_dt"]
-    .apply(lambda x: format_quarter_label(x) if pd.notna(x) else None)
+hist = panel.assign(
+    scenario="Actual",
+    quarter_label=panel["quarter"]   # ✅ raw label, never missing
 )
 
-# Defensive cleanup to prevent Altair showing "non"
-plot_df = plot_df.dropna(subset=["quarter_label"])
-plot_df["quarter_label"] = plot_df["quarter_label"].astype(str)
+plot_df = pd.concat([hist, proj], ignore_index=True)
 
+# Safety check – impossible to show "none"
+assert plot_df["quarter_label"].isna().sum() == 0
+
+# =========================
+# CHART
+# =========================
 chart = (
     alt.Chart(plot_df)
     .mark_line(point=True)
     .encode(
-        x=alt.X("quarter_label:N",
-                sort=alt.SortField("quarter_dt"),
-                title="Quarter"),
-        y=alt.Y("purchase_sales_bn:Q",
-                title="Purchase Sales (Bn)"),
+        x=alt.X(
+            "quarter_label:N",
+            sort=alt.SortField("quarter_dt", order="ascending"),
+            title="Quarter"
+        ),
+        y=alt.Y("purchase_sales_bn:Q", title="Purchase Sales (Bn)"),
         color=alt.Color(
             "bank:N",
-            scale=alt.Scale(domain=list(BANK_COLORS.keys()),
-                            range=list(BANK_COLORS.values()))
+            scale=alt.Scale(
+                domain=list(BANK_COLORS.keys()),
+                range=list(BANK_COLORS.values())
+            )
         ),
         strokeDash=alt.condition(
             alt.datum.scenario=="Actual",
