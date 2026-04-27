@@ -225,18 +225,6 @@ hist = panel.assign(
 
 plot_df = pd.concat([hist, proj], ignore_index=True)
 
-
-plot_df["quarter_label"] = plot_df["quarter_label"].where(
-    plot_df["quarter_label"].notna(),
-    plot_df["quarter_dt"]
-        .dt.to_period("Q")
-        .apply(lambda p: f"{p.quarter}Q{str(p.year)[-2:]}")
-)
-
-# Defensive: eliminate string 'None' if any survived casting
-plot_df["quarter_label"] = plot_df["quarter_label"].replace("None", "")
-
-
 display_df = plot_df[
     [
         "quarter_label",
@@ -248,7 +236,15 @@ display_df = plot_df[
     ]
 ]
 
+plot_df["quarter_label"] = plot_df["quarter_label"].where(
+    plot_df["quarter_label"].notna(),
+    plot_df["quarter_dt"]
+        .dt.to_period("Q")
+        .apply(lambda p: f"{p.quarter}Q{str(p.year)[-2:]}")
+)
 
+# Defensive: eliminate string 'None' if any survived casting
+plot_df["quarter_label"] = plot_df["quarter_label"].replace("None", "")
 
 # Safety check – impossible to show "none"
 assert plot_df["quarter_label"].isna().sum() == 0
