@@ -1,7 +1,7 @@
 # app_2.py
 # CCAP — Method C ONLY
-# Regime-corrected + one-time re-anchor (BDO/BPI)
-# Quarter labels are ALWAYS present (no 'none')
+# Clean UI: no raw quarter column shown
+# Stable quarter labels (1Q26, 4Q25, etc.)
 
 import numpy as np
 import pandas as pd
@@ -16,12 +16,11 @@ st.set_page_config(page_title="CCAP — Method C", layout="wide")
 RAW_URL = "https://raw.githubusercontent.com/vincentlascano000/ccap_data/main/CCAP_DATA.csv"
 TARGET_END = pd.Period("2028Q4", freq="Q")
 
-REGIME_SHIFT_PPT = 5.90  # permanent regime correction
+REGIME_SHIFT_PPT = 6.0
 
-# One-time level re-anchor (non-compounding)
 ONE_TIME_REANCHOR = {
-    "BDO": 1.055,  # +2.5%
-    "BPI": 1.055,  # +2.0%
+    "BDO": 1.025,  # +2.5%
+    "BPI": 1.020,  # +2.0%
 }
 
 BANK_COLORS = {
@@ -39,6 +38,7 @@ BANK_COLORS = {
 def parse_quarter_dt(value):
     if pd.isna(value):
         return pd.NaT
+
     s = str(value).strip().upper().replace(" ", "")
 
     # 1Q23 / 4Q25
@@ -50,7 +50,11 @@ def parse_quarter_dt(value):
 
     # 2026Q1
     if len(s) == 6 and s[:4].isdigit():
-        return pd.Period(year=int(s[:4]), quarter=int(s[-1]), freq="Q").to_timestamp(how="end")
+        return pd.Period(
+            year=int(s[:4]),
+            quarter=int(s[-1]),
+            freq="Q"
+        ).to_timestamp(how="end")
 
     return pd.to_datetime(s).to_period("Q").to_timestamp(how="end")
 
@@ -106,12 +110,8 @@ panel = (
        .reset_index(drop=True)
 )
 
-banks_pick = st.multiselect(
-    "Banks",
-    panel["bank"].unique().tolist(),
-    default=panel["bank"].unique().tolist()
-)
-
+banks = panel["bank"].unique().tolist()
+banks_pick = st.multiselect("Banks", banks, default=banks)
 panel = panel[panel["bank"].isin(banks_pick)]
 
 # =========================
@@ -127,7 +127,7 @@ def fit_uplift(panel_bank):
 
     bases = []
     for _, gb in g.groupby("bank"):
-        pools = {1:[],2:[],3:[],4:[]}
+        pools = {1: [], 2: [], 3: [], 4: []}
         base = []
         for _, r in gb.iterrows():
             base.append(np.mean(pools[r["q"]]) if pools[r["q"]] else np.nan)
@@ -138,7 +138,7 @@ def fit_uplift(panel_bank):
     g["g_base"] = pd.concat(bases).sort_index()
     g["r_ps"] = g["d_ps"] - g["g_base"]
 
-    fit = g.dropna(subset=["r_ps","d_cif","d_spc"])
+    fit = g.dropna(subset=["r_ps", "d_cif", "d_spc"])
     X = np.column_stack([np.ones(len(fit)), fit["d_cif"], fit["d_spc"]])
     y = fit["r_ps"].values
 
@@ -149,7 +149,7 @@ alpha_raw, beta_cif, beta_spc = fit_uplift(panel)
 alpha = alpha_raw + REGIME_SHIFT_PPT / 100
 
 # =========================
-# METHOD C — ONE-TIME RE-ANCHOR
+# METHOD C — ONE‑TIME RE‑ANCHOR
 # =========================
 def project_method_C(gb):
     last = gb["quarter_dt"].max().to_period("Q")
@@ -161,31 +161,30 @@ def project_method_C(gb):
     hist_cif = qoq_factors_by_quarter(gb["cards_in_force_bn"], gb["quarter_dt"])
     hist_spc = qoq_factors_by_quarter(gb["sales_per_cif_000"], gb["quarter_dt"])
 
-    fore_ps = {q:[] for q in range(1,5)}
-    fore_cif = {q:[] for q in range(1,5)}
-    fore_spc = {q:[] for q in range(1,5)}
+    fore_ps = {q: [] for q in range(1, 5)}
+    fore_cif = {q: [] for q in range(1, 5)}
+    fore_spc = {q: [] for q in range(1, 5)}
 
     ps  = gb.iloc[-1]["purchase_sales_bn"]
     cif = gb.iloc[-1]["cards_in_force_bn"]
     spc = gb.iloc[-1]["sales_per_cif_000"]
     bank = gb.iloc[0]["bank"]
 
-    rows = []
     anchored = False
+    rows = []
 
-    for h in range(1, H+1):
+    for h in range(1, H + 1):
         t = last + h
         q = t.quarter
         prev_ps = ps
 
-        g_base = np.mean((hist_ps[q]+fore_ps[q])[-K:]) - 1 if hist_ps[q]+fore_ps[q] else 0
-        d_cif  = np.mean((hist_cif[q]+fore_cif[q])[-K:]) - 1 if hist_cif[q]+fore_cif[q] else 0
-        d_spc  = np.mean((hist_spc[q]+fore_spc[q])[-K:]) - 1 if hist_spc[q]+fore_spc[q] else 0
+        g_base = np.mean((hist_ps[q] + fore_ps[q])[-K:]) - 1 if hist_ps[q] + fore_ps[q] else 0
+        d_cif  = np.mean((hist_cif[q] + fore_cif[q])[-K:]) - 1 if hist_cif[q] + fore_cif[q] else 0
+        d_spc  = np.mean((hist_spc[q] + fore_spc[q])[-K:]) - 1 if hist_spc[q] + fore_spc[q] else 0
 
         g_ps = g_base + (alpha + beta_cif*d_cif + beta_spc*d_spc)
         ps *= (1 + g_ps)
 
-        # ✅ ONE-TIME LEVEL RE-ANCHOR
         if not anchored and bank in ONE_TIME_REANCHOR:
             ps *= ONE_TIME_REANCHOR[bank]
             anchored = True
@@ -193,38 +192,44 @@ def project_method_C(gb):
         cif *= (1 + d_cif)
         spc *= (1 + d_spc)
 
-        fore_ps[q].append(ps/prev_ps)
-        fore_cif[q].append(1+d_cif)
-        fore_spc[q].append(1+d_spc)
-
         rows.append({
-            "bank": bank,
             "quarter_dt": t.to_timestamp(how="end"),
-            "quarter_label": period_to_qyy(t),  # ✅ ALWAYS SET HERE
+            "quarter_label": period_to_qyy(t),
+            "bank": bank,
             "purchase_sales_bn": ps,
             "cards_in_force_bn": cif,
             "sales_per_cif_000": spc,
             "scenario": "Method C",
         })
 
+        fore_ps[q].append(ps / prev_ps)
+        fore_cif[q].append(1 + d_cif)
+        fore_spc[q].append(1 + d_spc)
+
     return pd.DataFrame(rows)
 
 proj = pd.concat(
-    [project_method_C(panel[panel["bank"] == b]) for b in banks_pick
-     if panel[panel["bank"] == b].shape[0] >= 3],
+    [
+        project_method_C(panel[panel["bank"] == b])
+        for b in banks_pick
+        if panel[panel["bank"] == b].shape[0] >= 3
+    ],
     ignore_index=True
 )
 
 # =========================
-# CHART DATA (ACTUALS + PROJECTIONS)
+# CHART DATA
 # =========================
 hist = panel.assign(
-    scenario="Actual",
-    quarter_label=panel["quarter"]   # ✅ raw label, never missing
+    quarter_label=panel["quarter"],
+    scenario="Actual"
 )
 
 plot_df = pd.concat([hist, proj], ignore_index=True)
 
+# =========================
+# DISPLAY TABLE (NO raw quarter!)
+# =========================
 display_df = plot_df[
     [
         "quarter_label",
@@ -236,18 +241,8 @@ display_df = plot_df[
     ]
 ]
 
-plot_df["quarter_label"] = plot_df["quarter_label"].where(
-    plot_df["quarter_label"].notna(),
-    plot_df["quarter_dt"]
-        .dt.to_period("Q")
-        .apply(lambda p: f"{p.quarter}Q{str(p.year)[-2:]}")
-)
-
-# Defensive: eliminate string 'None' if any survived casting
-plot_df["quarter_label"] = plot_df["quarter_label"].replace("None", "")
-
-# Safety check – impossible to show "none"
-assert plot_df["quarter_label"].isna().sum() == 0
+st.subheader("Projected & Actual Values")
+st.dataframe(display_df)
 
 # =========================
 # CHART
@@ -270,13 +265,12 @@ chart = (
             )
         ),
         strokeDash=alt.condition(
-            alt.datum.scenario=="Actual",
+            alt.datum.scenario == "Actual",
             alt.value([0]),
             alt.value([6,4])
         ),
         tooltip=[
             "bank",
-            "quarter_label",
             "purchase_sales_bn",
             "cards_in_force_bn",
             "sales_per_cif_000"
