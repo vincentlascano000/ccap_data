@@ -244,20 +244,26 @@ proj = pd.concat(
     ignore_index=True
 )
 
-plot_df = pd.concat([
-    hist[["bank", "quarter_dt", "value", "scenario"]],
-    proj.assign(
-        quarter_dt=lambda d: d["quarter"].apply(
-            lambda x: pd.Period(x, freq="Q").to_timestamp(how="end")
-        )
-    )[["bank", "quarter_dt", "value", "scenario"]]
-])
+
+plot_df["quarter_label"] = (
+    plot_df["quarter_dt"]
+    .dt.to_period("Q")
+    .astype(str)
+    .str.replace("Q", "-Q")
+)
 
 chart = (
     alt.Chart(plot_df)
     .mark_line(point=True)
     .encode(
-        x=alt.X("quarter_dt:T", title="Quarter"),
+        x=alt.X(
+            "quarter_label:N",
+            title="Quarter",
+            sort=alt.SortField(
+                field="quarter_dt",
+                order="ascending"
+            )
+        ),
         y=alt.Y("value:Q", title="Purchase Sales"),
         color=alt.Color(
             "bank:N",
@@ -272,7 +278,7 @@ chart = (
             alt.value([0]),
             alt.value([6, 4])
         ),
-        tooltip=["bank", "quarter_dt", "value", "scenario"]
+        tooltip=["bank", "quarter_label", "value", "scenario"]
     )
     .properties(height=420)
 )
