@@ -235,7 +235,19 @@ plot_df["quarter_label"] = plot_df["quarter_label"].where(
 
 # Defensive: eliminate string 'None' if any survived casting
 plot_df["quarter_label"] = plot_df["quarter_label"].replace("None", "")
- 
+
+
+display_df = plot_df[
+    [
+        "quarter_label",
+        "bank",
+        "purchase_sales_bn",
+        "cards_in_force_bn",
+        "sales_per_cif_000",
+        "scenario",
+    ]
+]
+
 
 
 # Safety check – impossible to show "none"
