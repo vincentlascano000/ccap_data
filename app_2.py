@@ -19,8 +19,8 @@ TARGET_END = pd.Period("2028Q4", freq="Q")
 REGIME_SHIFT_PPT = 6.0
 
 ONE_TIME_REANCHOR = {
-    "BDO": 1.025,  # +2.5%
-    "BPI": 1.020,  # +2.0%
+    "BDO": 1.055,  # +2.5%
+    "BPI": 1.055,  # +2.0%
 }
 
 BANK_COLORS = {
