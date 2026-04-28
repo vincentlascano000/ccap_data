@@ -101,7 +101,6 @@ def fit_uplift(df):
     g["d_cif"] = g.groupby("bank")["cif"].pct_change()
     g["d_spc"] = g.groupby("bank")["spc"].pct_change()
 
-    # Full-history same-quarter seasonal baseline
     bases = []
     for _, gb in g.groupby("bank"):
         seasonal_mean = gb.groupby("q")["d_ps"].mean()
@@ -123,7 +122,7 @@ def fit_uplift(df):
 
 alpha_raw, beta_cif, beta_spc = fit_uplift(panel)
 
-# ✅ Effective intercept used in projections
+# intercept
 alpha = (
     alpha_raw
     + BASELINE_SHIFT_PPT / 100
@@ -231,7 +230,7 @@ chart = (
 st.altair_chart(chart, use_container_width=True)
 
 # =========================================================
-# 📌 MODEL INTERCEPTS & FORMULA (STAKEHOLDER VIEW)
+# MODEL INTERCEPTS & FORMULA (STAKEHOLDER VIEW)
 # =========================================================
 st.markdown(f"""
 ### Growth Formula Used (Method C)
