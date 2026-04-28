@@ -229,3 +229,61 @@ chart = (
 )
 
 st.altair_chart(chart, use_container_width=True)
+
+# =========================================================
+# 📌 MODEL INTERCEPTS & FORMULA (STAKEHOLDER VIEW)
+# =========================================================
+st.markdown("---")
+st.subheader("📌 Model Intercepts, Drivers, and Formula")
+
+st.markdown(f"""
+### Growth Formula Used (Method C)
+
+**Quarter‑on‑quarter Purchase Sales growth is modeled as:**
+
+\[
+\\Delta PS =
+\\underbrace{{\\text{{Same‑Quarter Baseline}}}}_{{\\text{{historical seasonality}}}}
++
+\\underbrace{{(\\alpha + {BASELINE_SHIFT_PPT:.1f}\\text{{ ppt}})}}_{{\\text{{macro baseline shift}}}}
++
+\\underbrace{{\\beta_{{CIF}} \\cdot \\Delta CIF}}_{{\\text{{cards in force effect}}}}
++
+\\underbrace{{\\beta_{{SPC}} \\cdot \\Delta (Sales/CIF)}}_{{\\text{{spend per card effect}}}}
+\]
+
+---
+
+### How to read this (plain English)
+
+• **Same‑Quarter Baseline**  
+&nbsp;&nbsp;Average historical growth for the *same calendar quarter* (e.g., Q1 vs Q1)
+
+• **Intercept (α + 6 ppt)**  
+&nbsp;&nbsp;Represents the **new underlying macro environment**, applied to all banks
+
+• **Cards in Force driver (β_CIF)**  
+&nbsp;&nbsp;Explains growth from expansion in active cards
+
+• **Sales per CIF driver (β_SPC)**  
+&nbsp;&nbsp;Explains growth from higher spend per card
+
+---
+
+### One‑Time Structural Adjustment (BDO & BPI only)
+
+• In **2026 Q1**, BDO and BPI receive a **one‑time +5.5% level adjustment**  
+• This reflects a **temporary spend spike**, not faster ongoing growth  
+• After the adjustment, **all banks follow the same growth formula**
+
+---
+
+### Estimated Model Parameters (from the data)
+
+| Component | Value |
+|---------|-------|
+| Intercept (α, raw) | `{alpha_raw:.4f}` |
+| Macro baseline uplift | `+{BASELINE_SHIFT_PPT:.1f} ppt` |
+| **Effective intercept** | **`{alpha:.4f}`** |
+| β (Cards in Force) | `{beta_cif:.4f}` |
+| β (Sales / CIF) | `{beta_spc:.4f}` |
