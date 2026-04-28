@@ -1,7 +1,7 @@
 # app_2.py
 # CCAP — Method C ONLY
-# +6 ppt is new baseline; BDO/BPI get +5.5 ppt incremental intercept
-# Clean UI (no raw quarter shown)
+# +6 ppt is new baseline
+# BDO/BPI get TEMPORARY +5.5 ppt residual that decays back to baseline
 
 import numpy as np
 import pandas as pd
@@ -17,7 +17,7 @@ RAW_URL = "https://raw.githubusercontent.com/vincentlascano000/ccap_data/main/CC
 TARGET_END = pd.Period("2028Q4", freq="Q")
 
 BASELINE_SHIFT_PPT = 6.0
-BDO_BPI_EXTRA_PPT = 5.5
+TEMP_PREMIUM_PPT = 5.5
 LARGE_BANKS = {"BDO", "BPI"}
 
 BANK_COLORS = {
@@ -30,7 +30,7 @@ BANK_COLORS = {
 }
 
 # =========================================================
-# QUARTER HELPERS
+# HELPERS — QUARTERS
 # =========================================================
 def parse_quarter_dt(val):
     s = str(val).strip().upper().replace(" ", "")
@@ -39,8 +39,22 @@ def parse_quarter_dt(val):
     year = 2000 + yy if yy < 100 else yy
     return pd.Period(year=year, quarter=q, freq="Q").to_timestamp(how="end")
 
-def period_to_qyy(p):
-    return f"{p.quarter}Q{str(p.year)[-2:]}"
+def format_qyy(period):
+    return f"{period.quarter}Q{str(period.year)[-2:]}"
+
+# =========================================================
+# TEMPORARY PREMIUM DECAY FUNCTION
+# =========================================================
+def bdo_bpi_temp_premium(period):
+    """
+    Temporary residual premium (ppt) that decays over time.
+    """
+    year = period.year
+    if year == 2026:
+        return TEMP_PREMIUM_PPT / 100
+    if year == 2027:
+        return 0.03  # +3.0 ppt
+    return 0.0
 
 # =========================================================
 # QoQ FACTORS
@@ -58,13 +72,13 @@ def qoq_factors_by_quarter(series, qdt):
 # =========================================================
 # UI
 # =========================================================
-st.title("CCAP — Method C (Regime‑Adjusted)")
+st.title("CCAP — Method C (Temporary BDO/BPI Spike)")
 K = st.sidebar.slider("Rolling same‑quarter window (K)", 3, 8, 6)
 
 # =========================================================
 # LOAD DATA
 # =========================================================
-raw = pd.read_csv(RAW_URL, engine="python").rename(columns={
+raw = pd.read_csv(RAW_URL).rename(columns={
     "QUARTER": "quarter",
     "BANK": "bank",
     "Purchase Sales (in Bn)": "purchase_sales_bn",
@@ -73,7 +87,7 @@ raw = pd.read_csv(RAW_URL, engine="python").rename(columns={
 })
 
 raw = raw[
-    ["quarter", "bank",
+    ["quarter","bank",
      "purchase_sales_bn",
      "cards_in_force_bn",
      "sales_per_cif_000"]
@@ -81,21 +95,17 @@ raw = raw[
 
 raw["quarter_dt"] = raw["quarter"].apply(parse_quarter_dt)
 
-for c in ["purchase_sales_bn", "cards_in_force_bn", "sales_per_cif_000"]:
+for c in ["purchase_sales_bn","cards_in_force_bn","sales_per_cif_000"]:
     raw[c] = pd.to_numeric(raw[c], errors="coerce")
 
-panel = (
-    raw.dropna()
-       .sort_values(["bank", "quarter_dt"])
-       .reset_index(drop=True)
-)
+panel = raw.dropna().sort_values(["bank","quarter_dt"]).reset_index(drop=True)
 
 banks = panel["bank"].unique().tolist()
 banks_pick = st.multiselect("Banks", banks, default=banks)
 panel = panel[panel["bank"].isin(banks_pick)]
 
 # =========================================================
-# FIT UPLIFT COEFFICIENTS
+# FIT COEFFICIENTS
 # =========================================================
 def fit_uplift(df):
     g = df.copy()
@@ -107,7 +117,7 @@ def fit_uplift(df):
 
     bases = []
     for _, gb in g.groupby("bank"):
-        pools = {1: [], 2: [], 3: [], 4: []}
+        pools = {1:[],2:[],3:[],4:[]}
         base = []
         for _, r in gb.iterrows():
             base.append(np.mean(pools[r["q"]]) if pools[r["q"]] else np.nan)
@@ -118,7 +128,7 @@ def fit_uplift(df):
     g["g_base"] = pd.concat(bases).sort_index()
     g["r_ps"] = g["d_ps"] - g["g_base"]
 
-    fit = g.dropna(subset=["r_ps", "d_cif", "d_spc"])
+    fit = g.dropna(subset=["r_ps","d_cif","d_spc"])
     X = np.column_stack([np.ones(len(fit)), fit["d_cif"], fit["d_spc"]])
     y = fit["r_ps"].values
 
@@ -126,12 +136,10 @@ def fit_uplift(df):
     return beta[0], beta[1], beta[2]
 
 alpha_raw, beta_cif, beta_spc = fit_uplift(panel)
-
-# ✅ +6 ppt becomes the new baseline
 alpha_baseline = alpha_raw + BASELINE_SHIFT_PPT / 100
 
 # =========================================================
-# METHOD C PROJECTION
+# METHOD C PROJECTION (TEMPORARY PREMIUM)
 # =========================================================
 def project_method_c(gb):
     last = gb["quarter_dt"].max().to_period("Q")
@@ -143,30 +151,29 @@ def project_method_c(gb):
     hist_cif = qoq_factors_by_quarter(gb["cards_in_force_bn"], gb["quarter_dt"])
     hist_spc = qoq_factors_by_quarter(gb["sales_per_cif_000"], gb["quarter_dt"])
 
-    fore_ps = {q: [] for q in range(1, 5)}
-    fore_cif = {q: [] for q in range(1, 5)}
-    fore_spc = {q: [] for q in range(1, 5)}
+    fore_ps = {q:[] for q in range(1,5)}
+    fore_cif = {q:[] for q in range(1,5)}
+    fore_spc = {q:[] for q in range(1,5)}
 
     ps  = gb.iloc[-1]["purchase_sales_bn"]
     cif = gb.iloc[-1]["cards_in_force_bn"]
     spc = gb.iloc[-1]["sales_per_cif_000"]
     bank = gb.iloc[0]["bank"]
 
-    # ✅ Only BDO/BPI get +5.5 ppt
-    alpha_bank = alpha_baseline
-    if bank in LARGE_BANKS:
-        alpha_bank += BDO_BPI_EXTRA_PPT / 100
-
     rows = []
 
-    for h in range(1, H + 1):
+    for h in range(1, H+1):
         t = last + h
         q = t.quarter
         prev_ps = ps
 
-        g_base = np.mean((hist_ps[q] + fore_ps[q])[-K:]) - 1 if hist_ps[q] + fore_ps[q] else 0
-        d_cif  = np.mean((hist_cif[q] + fore_cif[q])[-K:]) - 1 if hist_cif[q] + fore_cif[q] else 0
-        d_spc  = np.mean((hist_spc[q] + fore_spc[q])[-K:]) - 1 if hist_spc[q] + fore_spc[q] else 0
+        g_base = np.mean((hist_ps[q]+fore_ps[q])[-K:]) - 1 if hist_ps[q]+fore_ps[q] else 0
+        d_cif  = np.mean((hist_cif[q]+fore_cif[q])[-K:]) - 1 if hist_cif[q]+fore_cif[q] else 0
+        d_spc  = np.mean((hist_spc[q]+fore_spc[q])[-K:]) - 1 if hist_spc[q]+fore_spc[q] else 0
+
+        alpha_bank = alpha_baseline
+        if bank in LARGE_BANKS:
+            alpha_bank += bdo_bpi_temp_premium(t)
 
         g_ps = g_base + (alpha_bank + beta_cif*d_cif + beta_spc*d_spc)
 
@@ -176,7 +183,7 @@ def project_method_c(gb):
 
         rows.append({
             "quarter_dt": t.to_timestamp(how="end"),
-            "quarter_label": period_to_qyy(t),
+            "quarter_label": format_qyy(t),
             "bank": bank,
             "purchase_sales_bn": ps,
             "cards_in_force_bn": cif,
@@ -184,9 +191,9 @@ def project_method_c(gb):
             "scenario": "Method C",
         })
 
-        fore_ps[q].append(ps / prev_ps)
-        fore_cif[q].append(1 + d_cif)
-        fore_spc[q].append(1 + d_spc)
+        fore_ps[q].append(ps/prev_ps)
+        fore_cif[q].append(1+d_cif)
+        fore_spc[q].append(1+d_spc)
 
     return pd.DataFrame(rows)
 
@@ -200,7 +207,7 @@ proj = pd.concat(
 )
 
 # =========================================================
-# CHART + TABLE DATA
+# DISPLAY TABLE (NO raw quarter)
 # =========================================================
 hist = panel.assign(
     quarter_label=panel["quarter"],
@@ -209,16 +216,12 @@ hist = panel.assign(
 
 plot_df = pd.concat([hist, proj], ignore_index=True)
 
-# ✅ Table-only dataframe (NO raw quarter)
 display_df = plot_df[
-    [
-        "quarter_label",
-        "bank",
-        "purchase_sales_bn",
-        "cards_in_force_bn",
-        "sales_per_cif_000",
-        "scenario",
-    ]
+    ["quarter_label","bank",
+     "purchase_sales_bn",
+     "cards_in_force_bn",
+     "sales_per_cif_000",
+     "scenario"]
 ]
 
 st.subheader("Actuals & Projections")
@@ -231,21 +234,15 @@ chart = (
     alt.Chart(plot_df)
     .mark_line(point=True)
     .encode(
-        x=alt.X(
-            "quarter_label:N",
-            sort=alt.SortField("quarter_dt", order="ascending"),
-            title="Quarter"
-        ),
+        x=alt.X("quarter_label:N",
+                sort=alt.SortField("quarter_dt"),
+                title="Quarter"),
         y=alt.Y("purchase_sales_bn:Q", title="Purchase Sales (Bn)"),
-        color=alt.Color(
-            "bank:N",
-            scale=alt.Scale(
-                domain=list(BANK_COLORS.keys()),
-                range=list(BANK_COLORS.values())
-            )
-        ),
+        color=alt.Color("bank:N",
+            scale=alt.Scale(domain=list(BANK_COLORS.keys()),
+                            range=list(BANK_COLORS.values()))),
         strokeDash=alt.condition(
-            alt.datum.scenario == "Actual",
+            alt.datum.scenario=="Actual",
             alt.value([0]),
             alt.value([6,4])
         )
