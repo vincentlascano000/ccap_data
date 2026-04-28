@@ -239,23 +239,12 @@ st.subheader("Model Intercepts, Drivers, and Formula")
 st.markdown(f"""
 ### Growth Formula Used (Method C)
 
-**Quarter‑on‑quarter Purchase Sales growth formula:**
+**Quarter‑on‑quarter Purchase Sales growth formula:**)
 
 st.markdown(r"""
 ### Growth Model (Quarter‑on‑Quarter)
 
-$$
-\Delta PS
-=
-G_{baseline}
-+
-(\alpha + 6.0)
-+
-\beta_{CIF}\,\Delta CIF
-+
-\beta_{SPC}\,\Delta(Sales/CIF)
-$$
-""")
+$$ \Delta PS = G_{baseline} + (\alpha + 6.0) + \beta_{CIF}\,\Delta CIF + \beta_{SPC}\,\Delta(Sales/CIF) $$ """)
 ---
 
 ### How to read this
