@@ -243,7 +243,6 @@ st.markdown(f"""
 
 st.markdown(r"""
 ### Growth Model (Quarter‑on‑Quarter)
-
 \[
 \Delta PS
 =
