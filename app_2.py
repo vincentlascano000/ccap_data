@@ -249,18 +249,19 @@ st.markdown(f"""
 +
 \\underbrace{{\\beta_{{CIF}} \\cdot \\Delta CIF}}_{{\\text{{cards in force effect}}}}
 +
-\\underbrace{{\\beta_{{SPC}} \\cdot \\Delta (Sales/CIF)}}_{{\\text{{spend per card effect}}}}
+\\underbrace{\beta_{SPC} \cdot \Delta (Sales/CIF)}_{\text{spend per card effect}}}}
 \]
+
 
 ---
 
-### How to read this (plain English)
+### How to read this
 
 • **Same‑Quarter Baseline**  
 &nbsp;&nbsp;Average historical growth for the *same calendar quarter* (e.g., Q1 vs Q1)
 
 • **Intercept (α + 6 ppt)**  
-&nbsp;&nbsp;Represents the **new underlying macro environment**, applied to all banks
+&nbsp;&nbsp;Represents the current economy‑wide growth conditions, applied to all banks
 
 • **Cards in Force driver (β_CIF)**  
 &nbsp;&nbsp;Explains growth from expansion in active cards
@@ -273,7 +274,7 @@ st.markdown(f"""
 ### One‑Time Structural Adjustment (BDO & BPI only)
 
 • In **2026 Q1**, BDO and BPI receive a **one‑time +5.5% level adjustment**  
-• This reflects a **temporary spend spike**, not faster ongoing growth  
+• This reflects a **temporary spend spike** 
 • After the adjustment, **all banks follow the same growth formula**
 
 ---
@@ -288,7 +289,7 @@ st.markdown(f"""
 | β (Cards in Force) | `{beta_cif:.4f}` |
 | β (Sales / CIF) | `{beta_spc:.4f}` |
 
-✅ **Key takeaway:**  
-The model cleanly separates **seasonality**, **macro regime shift**, **structural drivers**, and **one‑off bank effects** — without compounding distortions.
+**Key takeaway:**  
+The model cleanly separates **seasonality**, **regime shifts**, **structural drivers**, and **one‑off bank effects** — without compounding distortions.
 """)
 
