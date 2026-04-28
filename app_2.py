@@ -33,10 +33,17 @@ BANK_COLORS = {
 # QUARTER HELPERS (FIXED)
 # =========================================================
 def parse_quarter_dt(q):
+    """
+    Accepts strings like '1Q23', '4Q25'
+    Returns quarter-end timestamp
+    """
     s = str(q).strip().upper()
     quarter = int(s[0])
     year = 2000 + int(s[2:])
-    return pd.Period(year=year, quarter=quarter, freq="Q").to_timestamp(how="end")
+    return (
+        pd.Period(year=year, quarter=quarter, freq="Q")
+        .to_timestamp(how="end")
+    )
 
 def fmt_q(p):
     return f"{p.quarter}Q{str(p.year)[-2:]}"
@@ -150,11 +157,12 @@ def project_method_c(gb):
         d_spc = np.mean((hist_spc[q] + fore_spc[q])[-K:]) - 1 if hist_spc[q] + fore_spc[q] else 0
 
         g_ps = g_base + (alpha + beta_cif * d_cif + beta_spc * d_spc)
-        g_ps = np.clip(g_ps, -0.3, 0.3)
+        g_ps = np.clip(g_ps, -0.3, 0.3)  # hard safety clamp
 
         prev_ps = ps
         ps *= (1 + g_ps)
 
+        # ✅ ONE-TIME spike at 2026 Q1
         if (
             not lifted
             and bank in LARGE_BANKS
@@ -207,8 +215,10 @@ chart = (
         y=alt.Y("ps:Q", title="Purchase Sales (Bn)"),
         color=alt.Color(
             "bank:N",
-            scale=alt.Scale(domain=list(BANK_COLORS.keys()),
-                            range=list(BANK_COLORS.values())),
+            scale=alt.Scale(
+                domain=list(BANK_COLORS.keys()),
+                range=list(BANK_COLORS.values()),
+            ),
         ),
         strokeDash=alt.condition(
             alt.datum.scenario == "Actual",
@@ -219,58 +229,3 @@ chart = (
 )
 
 st.altair_chart(chart, use_container_width=True)
-
-# =========================================================
-# 📌 STAKEHOLDER MODEL EXPLANATION PANEL (NEW, READ‑ONLY)
-# =========================================================
-st.markdown("---")
-st.subheader("📌 Model Parameters & Logic (Stakeholder View)")
-
-st.markdown(f"""
-### How quarterly Purchase Sales growth is modeled
-
-**Method C decomposes growth into four components:**
-
-\[
-\\textbf{{QoQ Change}} =
-\\text{{Seasonal Baseline}}
-+ (\\alpha + {BASELINE_SHIFT_PPT:.1f}\\text{{ ppt}})
-+ \\beta_{{CIF}}\\cdot \\Delta CIF
-+ \\beta_{{SPC}}\\cdot \\Delta (Sales/CIF)
-\]
-
----
-
-### Explanation in plain language
-
-• **Seasonal baseline**  
-&nbsp;&nbsp;Average historical growth for the *same quarter* (e.g. Q1 vs Q1)
-
-• **Intercept (α + 6 ppt)**  
-&nbsp;&nbsp;Represents the **new macro environment**, applied to all banks
-
-• **Cards‑in‑Force driver**  
-&nbsp;&nbsp;Additional growth explained by expansion in active cards
-
-• **Sales per CIF driver**  
-&nbsp;&nbsp;Additional growth from higher spend per card
-
----
-
-### One‑time structural adjustment (BDO & BPI)
-
-• In **2026 Q1 only**, BDO and BPI received a **+5.5% level re‑anchor**  
-• This reflects a **temporary step‑up**, not faster long‑term growth  
-• After 2026 Q1, **all banks grow under the same formula**
-
----
-
-### Estimated parameters from the data
-
-| Parameter | Value |
-|---------|-------|
-| Intercept (α – raw) | `{alpha_raw:.4f}` |
-| Macro uplift | `+{BASELINE_SHIFT_PPT:.1f} ppt` |
-| **Effective intercept** | **`{alpha:.4f}`** |
-| β (Cards in Force) | `{beta_cif:.4f}` |
-| β (Sales / CIF) | `{beta_spc:.4f}` |
