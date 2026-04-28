@@ -228,8 +228,6 @@ chart = (
     )
 )
 
-st.altair_chart(chart, use_container_width=True)
-
 # =========================================================
 # 📌 MODEL INTERCEPTS & FORMULA (STAKEHOLDER VIEW)
 # =========================================================
@@ -250,29 +248,28 @@ G_{baseline}
 \beta_{SPC}\,\Delta(Sales/CIF)
 $$
 
-
 ---
 
 ### How to read this
 
 • **Same‑Quarter Baseline**  
-&nbsp;&nbsp;Average historical growth for the *same calendar quarter* (e.g., Q1 vs Q1)
+Average historical growth for the *same calendar quarter* (e.g., Q1 vs Q1)
 
 • **Intercept (α + 6 ppt)**  
-&nbsp;&nbsp;Represents the current economy‑wide growth conditions, applied to all banks
+Represents the current economy‑wide growth conditions, applied to all banks
 
 • **Cards in Force driver (β_CIF)**  
-&nbsp;&nbsp;Explains growth from expansion in active cards
+Explains growth from expansion in active cards
 
 • **Sales per CIF driver (β_SPC)**  
-&nbsp;&nbsp;Explains growth from higher spend per card
+Explains growth from higher spend per card
 
 ---
 
 ### One‑Time Structural Adjustment (BDO & BPI only)
 
 • In **2026 Q1**, BDO and BPI receive a **one‑time +5.5% level adjustment**  
-• This reflects a **temporary spend spike** 
+• This reflects a **temporary spend spike**  
 • After the adjustment, **all banks follow the same growth formula**
 
 ---
@@ -288,7 +285,9 @@ $$
 | β (Sales / CIF) | `{beta_spc:.4f}` |
 
 **Key takeaway:**  
-The model cleanly separates **seasonality**, **regime shifts**, **structural drivers**, and **one‑off bank effects** — without compounding distortions.
+The model cleanly separates **seasonality**, **regime shifts**, **structural drivers**,  
+and **one‑off bank effects** — without compounding distortions.
 """)
-""")
+
+st.altair_chart(chart, use_container_width=True)
 
