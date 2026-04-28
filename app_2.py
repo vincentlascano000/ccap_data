@@ -249,7 +249,7 @@ G_{baseline}
 +
 \beta_{SPC}\,\Delta(Sales/CIF)
 $$
-""")
+
 
 ---
 
@@ -289,5 +289,6 @@ $$
 
 **Key takeaway:**  
 The model cleanly separates **seasonality**, **regime shifts**, **structural drivers**, and **one‑off bank effects** — without compounding distortions.
+""")
 """)
 
