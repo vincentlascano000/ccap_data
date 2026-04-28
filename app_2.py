@@ -243,7 +243,7 @@ $$
 =
 G_{{baseline}}
 +
-(\\alpha + {BASELINE_SHIFT_PPT:.1f})
+(\\alpha + {scenario_ppt:.1f})
 +
 \\beta_{{CIF}}\\,\\Delta CIF
 +
@@ -269,7 +269,7 @@ $$
 • **Same‑Quarter Baseline**  
 Average historical growth for the same calendar quarter
 
-• **Intercept (α + scenario_ppt)**  
+• **Intercept (α + {scenario_ppt:.1f})**  
 Represents current economy‑wide growth conditions, applied to all banks
 
 • **Drivers (β terms)**  
