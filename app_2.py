@@ -227,7 +227,9 @@ chart = (
         ),
     )
 )
-st.write("DEBUG: chart rendered above this line")
+
+st.altair_chart(chart, use_container_width=True)
+
 # =========================================================
 # 📌 MODEL INTERCEPTS & FORMULA (STAKEHOLDER VIEW)
 # =========================================================
