@@ -57,7 +57,7 @@ scenario_ppt = st.sidebar.slider(
     min_value=-10.0,
     max_value=10.0,
     value=0.0,
-    step=0.5,
+    step=0.01,
     help="Economy‑wide growth adjustment applied to all banks"
 )
 
@@ -257,7 +257,7 @@ $$
 | Component | Value |
 |---------|-------|
 | Intercept (α, raw) | `{alpha_raw:.4f}` |
-| Macro baseline uplift | `+{BASELINE_SHIFT_PPT:.1f} ppt` |
+| Macro baseline uplift | `+{scenario_ppt:.1f} ppt` |
 | **Effective intercept** | **`{alpha:.4f}`** |
 | β (Cards in Force) | `{beta_cif:.4f}` |
 | β (Sales / CIF) | `{beta_spc:.4f}` |
@@ -269,7 +269,7 @@ $$
 • **Same‑Quarter Baseline**  
 Average historical growth for the same calendar quarter
 
-• **Intercept (α + 6 ppt)**  
+• **Intercept (α + scenario_ppt)**  
 Represents current economy‑wide growth conditions, applied to all banks
 
 • **Drivers (β terms)**  
