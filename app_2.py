@@ -19,7 +19,7 @@ RAW_URL = "https://raw.githubusercontent.com/vincentlascano000/ccap_data/main/CC
 TARGET_END = pd.Period("2028Q4", freq="Q")
 
 BASELINE_SHIFT_PPT = 0          # permanent structural uplift
-ONE_TIME_LIFT = 1.055             # +5.5% level jump
+ONE_TIME_LIFT = 1.050             # +5.5% level jump
 LARGE_BANKS = {"BDO", "BPI"}
 
 BANK_COLORS = {
@@ -57,7 +57,7 @@ scenario_ppt = st.sidebar.slider(
     min_value=-10.0,
     max_value=10.0,
     value=0.0,
-    step=0.01,
+    step=0.05,
     help="Economy‑wide growth adjustment applied to all banks"
 )
 
