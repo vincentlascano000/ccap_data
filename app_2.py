@@ -53,7 +53,7 @@ def bdo_bpi_temp_premium(period):
     if year == 2026:
         return TEMP_PREMIUM_PPT / 100
     if year == 2027:
-        return 0.0005  # +3.0 ppt
+        return 0.000001  # +3.0 ppt
     return 0.0
 
 # =========================================================
