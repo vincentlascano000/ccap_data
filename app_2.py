@@ -287,3 +287,8 @@ st.markdown(f"""
 | **Effective intercept** | **`{alpha:.4f}`** |
 | β (Cards in Force) | `{beta_cif:.4f}` |
 | β (Sales / CIF) | `{beta_spc:.4f}` |
+
+✅ **Key takeaway:**  
+The model cleanly separates **seasonality**, **macro regime shift**, **structural drivers**, and **one‑off bank effects** — without compounding distortions.
+""")
+
