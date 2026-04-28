@@ -276,5 +276,5 @@ Represents current economy‑wide growth conditions, applied to all banks
 Explain growth from card base expansion and spend intensity
 
 • **One‑time BDO/BPI adjustment**  
-A single +5.5% level uplift in **2026 Q1 only**, not ongoing growth
+A single +5.0% level uplift in **2026 Q1 only**, not ongoing growth
 """)
