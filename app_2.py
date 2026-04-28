@@ -1,8 +1,7 @@
 # app_2.py
 # CCAP — Method C ONLY
-# Option A: +6 ppt permanent baseline
-# ONE‑TIME +5.5% level re‑anchor for BDO/BPI at 2026 Q1
-# quarter_dt used internally only (not displayed)
+# Option A: Permanent +6 ppt baseline, ONE-TIME +5.5% level spike for BDO/BPI at 2026Q1
+# FIXED quarter parsing and growth logic
 
 import numpy as np
 import pandas as pd
@@ -18,7 +17,7 @@ RAW_URL = "https://raw.githubusercontent.com/vincentlascano000/ccap_data/main/CC
 TARGET_END = pd.Period("2028Q4", freq="Q")
 
 BASELINE_SHIFT_PPT = 6.0
-ONE_TIME_LIFT = 1.055          # +5.5% level jump
+ONE_TIME_LIFT = 1.055   # +5.5% level jump
 LARGE_BANKS = {"BDO", "BPI"}
 
 BANK_COLORS = {
@@ -31,21 +30,19 @@ BANK_COLORS = {
 }
 
 # =========================================================
-# QUARTER HELPERS
+# QUARTER HELPERS (FIXED)
 # =========================================================
 def parse_quarter_dt(q):
-    q = str(q).strip().upper()
-    return pd.Period(
-        year=2000 + int(q[2:]),
-        quarter=int(q[0]),
-        freq="Q"
-    ).to_timestamp(how="end")
+    s = str(q).strip().upper()
+    quarter = int(s[0])
+    year = 2000 + int(s[2:])
+    return pd.Period(year=year, quarter=quarter, freq="Q").to_timestamp(how="end")
 
-def fmt_quarter(p):
+def fmt_q(p):
     return f"{p.quarter}Q{str(p.year)[-2:]}"
 
 # =========================================================
-# QoQ FACTORS (SAFE)
+# QoQ FACTORS (GUARDED)
 # =========================================================
 def qoq_factors_by_quarter(series, qdt):
     per = qdt.dt.to_period("Q")
@@ -81,11 +78,7 @@ raw["quarter_dt"] = raw["quarter"].apply(parse_quarter_dt)
 for c in ["ps", "cif", "spc"]:
     raw[c] = pd.to_numeric(raw[c], errors="coerce")
 
-panel = (
-    raw.dropna()
-       .sort_values(["bank", "quarter_dt"])
-       .reset_index(drop=True)
-)
+panel = raw.dropna().sort_values(["bank", "quarter_dt"]).reset_index(drop=True)
 
 banks = panel["bank"].unique().tolist()
 banks_pick = st.multiselect("Banks", banks, default=banks)
@@ -126,7 +119,7 @@ alpha_raw, beta_cif, beta_spc = fit_uplift(panel)
 alpha = alpha_raw + BASELINE_SHIFT_PPT / 100
 
 # =========================================================
-# METHOD C PROJECTION (OPTION A)
+# METHOD C PROJECTION — OPTION A (SAFE)
 # =========================================================
 def project_method_c(gb):
     last = gb["quarter_dt"].max().to_period("Q")
@@ -157,7 +150,7 @@ def project_method_c(gb):
         d_spc = np.mean((hist_spc[q] + fore_spc[q])[-K:]) - 1 if hist_spc[q] + fore_spc[q] else 0
 
         g_ps = g_base + (alpha + beta_cif * d_cif + beta_spc * d_spc)
-        g_ps = np.clip(g_ps, -0.30, 0.30)
+        g_ps = np.clip(g_ps, -0.3, 0.3)
 
         prev_ps = ps
         ps *= (1 + g_ps)
@@ -179,7 +172,8 @@ def project_method_c(gb):
         fore_spc[q].append(1 + d_spc)
 
         rows.append({
-            "quarter_label": fmt_quarter(t),
+            "quarter_dt": t.to_timestamp(how="end"),
+            "quarter_label": fmt_q(t),
             "bank": bank,
             "ps": ps,
             "scenario": "Method C",
@@ -193,88 +187,90 @@ proj = pd.concat(
         for b in banks_pick
         if panel[panel["bank"] == b].shape[0] >= 3
     ],
-    ignore_index=True
+    ignore_index=True,
 )
 
 # =========================================================
-# DISPLAY DATA (NO quarter_dt)
+# DISPLAY
 # =========================================================
 hist = panel.assign(
-    quarter_label=panel["quarter"],
-    scenario="Actual"
+    quarter_label=panel["quarter"], scenario="Actual"
 )[["quarter_label", "bank", "ps", "scenario"]]
 
 plot_df = pd.concat([hist, proj], ignore_index=True)
 
-# =========================================================
-# CHART
-# =========================================================
 chart = (
     alt.Chart(plot_df)
     .mark_line(point=True)
     .encode(
-        x=alt.X("quarter_label:N", title="Quarter"),
+        x=alt.X("quarter_label:N", sort=alt.SortField("quarter_dt")),
         y=alt.Y("ps:Q", title="Purchase Sales (Bn)"),
         color=alt.Color(
             "bank:N",
             scale=alt.Scale(domain=list(BANK_COLORS.keys()),
-                            range=list(BANK_COLORS.values()))
+                            range=list(BANK_COLORS.values())),
         ),
         strokeDash=alt.condition(
             alt.datum.scenario == "Actual",
             alt.value([0]),
-            alt.value([6, 4])
-        )
+            alt.value([6, 4]),
+        ),
     )
-    .properties(height=420)
 )
 
 st.altair_chart(chart, use_container_width=True)
 
 # =========================================================
-# STAKEHOLDER EXPLANATION PANEL
+# 📌 STAKEHOLDER MODEL EXPLANATION PANEL (NEW, READ‑ONLY)
 # =========================================================
 st.markdown("---")
-st.subheader("📌 Model Logic & Parameters (Stakeholder View)")
+st.subheader("📌 Model Parameters & Logic (Stakeholder View)")
 
 st.markdown(f"""
-### 1. Core Formula (Quarter‑on‑Quarter Change)
+### How quarterly Purchase Sales growth is modeled
 
-**Purchase Sales Change** is modeled as:
+**Method C decomposes growth into four components:**
 
 \[
-\Delta PS =
-\\underbrace{{\\text{{Same‑Quarter Baseline}}}}_{{\\text{{seasonality}}}}
-+
-\\underbrace{{(\\alpha + {BASELINE_SHIFT_PPT:.1f}\\text{{ ppt}})}}_{{\\text{{new macro baseline}}}}
-+
-\\underbrace{{\\beta_{{CIF}} \\cdot \\Delta CIF}}_{{\\text{{cards growth effect}}}}
-+
-\\underbrace{{\\beta_{{SPC}} \\cdot \\Delta (Sales/CIF)}}_{{\\text{{spend intensity effect}}}}
+\\textbf{{QoQ Change}} =
+\\text{{Seasonal Baseline}}
++ (\\alpha + {BASELINE_SHIFT_PPT:.1f}\\text{{ ppt}})
++ \\beta_{{CIF}}\\cdot \\Delta CIF
++ \\beta_{{SPC}}\\cdot \\Delta (Sales/CIF)
 \]
 
 ---
 
-### 2. One‑Time Structural Adjustment (BDO & BPI Only)
+### Explanation in plain language
 
-- In **2026 Q1**, BDO and BPI receive a **one‑time +5.5% level re‑anchor**
-- This reflects a **temporary structural spike**, not faster long‑term growth
-- After 2026 Q1, **all banks follow the same growth rules**
+• **Seasonal baseline**  
+&nbsp;&nbsp;Average historical growth for the *same quarter* (e.g. Q1 vs Q1)
+
+• **Intercept (α + 6 ppt)**  
+&nbsp;&nbsp;Represents the **new macro environment**, applied to all banks
+
+• **Cards‑in‑Force driver**  
+&nbsp;&nbsp;Additional growth explained by expansion in active cards
+
+• **Sales per CIF driver**  
+&nbsp;&nbsp;Additional growth from higher spend per card
 
 ---
 
-### 3. Estimated Parameters
+### One‑time structural adjustment (BDO & BPI)
 
-| Component | Value |
-|--------|-------|
-| Intercept (α, raw) | `{alpha_raw:.4f}` |
-| Baseline uplift | `+{BASELINE_SHIFT_PPT:.1f} ppt` |
-| **Effective baseline intercept** | **`{alpha:.4f}`** |
+• In **2026 Q1 only**, BDO and BPI received a **+5.5% level re‑anchor**  
+• This reflects a **temporary step‑up**, not faster long‑term growth  
+• After 2026 Q1, **all banks grow under the same formula**
+
+---
+
+### Estimated parameters from the data
+
+| Parameter | Value |
+|---------|-------|
+| Intercept (α – raw) | `{alpha_raw:.4f}` |
+| Macro uplift | `+{BASELINE_SHIFT_PPT:.1f} ppt` |
+| **Effective intercept** | **`{alpha:.4f}`** |
 | β (Cards in Force) | `{beta_cif:.4f}` |
 | β (Sales / CIF) | `{beta_spc:.4f}` |
-
----
-
-✅ **Key takeaway:**  
-The model separates **seasonality**, **macro regime shift**, **structural drivers**, and **one‑off bank‑specific effects** — without allowing unrealistic compounding.
-""")
