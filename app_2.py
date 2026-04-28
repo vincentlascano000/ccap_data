@@ -1,7 +1,8 @@
 # app_2.py
 # CCAP — Method C ONLY
-# Option A: Permanent +6 ppt baseline, ONE-TIME +5.5% level spike for BDO/BPI at 2026Q1
-# FIXED quarter parsing and growth logic
+# Option A: +6 ppt permanent baseline
+# ONE‑TIME +5.5% level re‑anchor for BDO/BPI at 2026 Q1
+# quarter_dt used internally only (not displayed)
 
 import numpy as np
 import pandas as pd
@@ -17,7 +18,7 @@ RAW_URL = "https://raw.githubusercontent.com/vincentlascano000/ccap_data/main/CC
 TARGET_END = pd.Period("2028Q4", freq="Q")
 
 BASELINE_SHIFT_PPT = 6.0
-ONE_TIME_LIFT = 1.055   # +5.5% level jump
+ONE_TIME_LIFT = 1.055          # +5.5% level jump
 LARGE_BANKS = {"BDO", "BPI"}
 
 BANK_COLORS = {
@@ -30,26 +31,21 @@ BANK_COLORS = {
 }
 
 # =========================================================
-# QUARTER HELPERS (FIXED)
+# QUARTER HELPERS
 # =========================================================
 def parse_quarter_dt(q):
-    """
-    Accepts strings like '1Q23', '4Q25'
-    Returns quarter-end timestamp
-    """
-    s = str(q).strip().upper()
-    quarter = int(s[0])
-    year = 2000 + int(s[2:])
-    return (
-        pd.Period(year=year, quarter=quarter, freq="Q")
-        .to_timestamp(how="end")
-    )
+    q = str(q).strip().upper()
+    return pd.Period(
+        year=2000 + int(q[2:]),
+        quarter=int(q[0]),
+        freq="Q"
+    ).to_timestamp(how="end")
 
-def fmt_q(p):
+def fmt_quarter(p):
     return f"{p.quarter}Q{str(p.year)[-2:]}"
 
 # =========================================================
-# QoQ FACTORS (GUARDED)
+# QoQ FACTORS (SAFE)
 # =========================================================
 def qoq_factors_by_quarter(series, qdt):
     per = qdt.dt.to_period("Q")
@@ -85,7 +81,11 @@ raw["quarter_dt"] = raw["quarter"].apply(parse_quarter_dt)
 for c in ["ps", "cif", "spc"]:
     raw[c] = pd.to_numeric(raw[c], errors="coerce")
 
-panel = raw.dropna().sort_values(["bank", "quarter_dt"]).reset_index(drop=True)
+panel = (
+    raw.dropna()
+       .sort_values(["bank", "quarter_dt"])
+       .reset_index(drop=True)
+)
 
 banks = panel["bank"].unique().tolist()
 banks_pick = st.multiselect("Banks", banks, default=banks)
@@ -126,7 +126,7 @@ alpha_raw, beta_cif, beta_spc = fit_uplift(panel)
 alpha = alpha_raw + BASELINE_SHIFT_PPT / 100
 
 # =========================================================
-# METHOD C PROJECTION — OPTION A (SAFE)
+# METHOD C PROJECTION (OPTION A)
 # =========================================================
 def project_method_c(gb):
     last = gb["quarter_dt"].max().to_period("Q")
@@ -157,12 +157,11 @@ def project_method_c(gb):
         d_spc = np.mean((hist_spc[q] + fore_spc[q])[-K:]) - 1 if hist_spc[q] + fore_spc[q] else 0
 
         g_ps = g_base + (alpha + beta_cif * d_cif + beta_spc * d_spc)
-        g_ps = np.clip(g_ps, -0.3, 0.3)  # hard safety clamp
+        g_ps = np.clip(g_ps, -0.30, 0.30)
 
         prev_ps = ps
         ps *= (1 + g_ps)
 
-        # ✅ ONE-TIME spike at 2026 Q1
         if (
             not lifted
             and bank in LARGE_BANKS
@@ -180,8 +179,7 @@ def project_method_c(gb):
         fore_spc[q].append(1 + d_spc)
 
         rows.append({
-            "quarter_dt": t.to_timestamp(how="end"),
-            "quarter_label": fmt_q(t),
+            "quarter_label": fmt_quarter(t),
             "bank": bank,
             "ps": ps,
             "scenario": "Method C",
@@ -195,37 +193,88 @@ proj = pd.concat(
         for b in banks_pick
         if panel[panel["bank"] == b].shape[0] >= 3
     ],
-    ignore_index=True,
+    ignore_index=True
 )
 
 # =========================================================
-# DISPLAY
+# DISPLAY DATA (NO quarter_dt)
 # =========================================================
 hist = panel.assign(
-    quarter_label=panel["quarter"], scenario="Actual"
+    quarter_label=panel["quarter"],
+    scenario="Actual"
 )[["quarter_label", "bank", "ps", "scenario"]]
 
 plot_df = pd.concat([hist, proj], ignore_index=True)
 
+# =========================================================
+# CHART
+# =========================================================
 chart = (
     alt.Chart(plot_df)
     .mark_line(point=True)
     .encode(
-        x=alt.X("quarter_label:N", sort=alt.SortField("quarter_dt")),
+        x=alt.X("quarter_label:N", title="Quarter"),
         y=alt.Y("ps:Q", title="Purchase Sales (Bn)"),
         color=alt.Color(
             "bank:N",
-            scale=alt.Scale(
-                domain=list(BANK_COLORS.keys()),
-                range=list(BANK_COLORS.values()),
-            ),
+            scale=alt.Scale(domain=list(BANK_COLORS.keys()),
+                            range=list(BANK_COLORS.values()))
         ),
         strokeDash=alt.condition(
             alt.datum.scenario == "Actual",
             alt.value([0]),
-            alt.value([6, 4]),
-        ),
+            alt.value([6, 4])
+        )
     )
+    .properties(height=420)
 )
 
 st.altair_chart(chart, use_container_width=True)
+
+# =========================================================
+# STAKEHOLDER EXPLANATION PANEL
+# =========================================================
+st.markdown("---")
+st.subheader("📌 Model Logic & Parameters (Stakeholder View)")
+
+st.markdown(f"""
+### 1. Core Formula (Quarter‑on‑Quarter Change)
+
+**Purchase Sales Change** is modeled as:
+
+\[
+\Delta PS =
+\\underbrace{{\\text{{Same‑Quarter Baseline}}}}_{{\\text{{seasonality}}}}
++
+\\underbrace{{(\\alpha + {BASELINE_SHIFT_PPT:.1f}\\text{{ ppt}})}}_{{\\text{{new macro baseline}}}}
++
+\\underbrace{{\\beta_{{CIF}} \\cdot \\Delta CIF}}_{{\\text{{cards growth effect}}}}
++
+\\underbrace{{\\beta_{{SPC}} \\cdot \\Delta (Sales/CIF)}}_{{\\text{{spend intensity effect}}}}
+\]
+
+---
+
+### 2. One‑Time Structural Adjustment (BDO & BPI Only)
+
+- In **2026 Q1**, BDO and BPI receive a **one‑time +5.5% level re‑anchor**
+- This reflects a **temporary structural spike**, not faster long‑term growth
+- After 2026 Q1, **all banks follow the same growth rules**
+
+---
+
+### 3. Estimated Parameters
+
+| Component | Value |
+|--------|-------|
+| Intercept (α, raw) | `{alpha_raw:.4f}` |
+| Baseline uplift | `+{BASELINE_SHIFT_PPT:.1f} ppt` |
+| **Effective baseline intercept** | **`{alpha:.4f}`** |
+| β (Cards in Force) | `{beta_cif:.4f}` |
+| β (Sales / CIF) | `{beta_spc:.4f}` |
+
+---
+
+✅ **Key takeaway:**  
+The model separates **seasonality**, **macro regime shift**, **structural drivers**, and **one‑off bank‑specific effects** — without allowing unrealistic compounding.
+""")
