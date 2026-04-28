@@ -227,7 +227,7 @@ chart = (
         ),
     )
 )
-
+st.write("DEBUG: chart rendered above this line")
 # =========================================================
 # 📌 MODEL INTERCEPTS & FORMULA (STAKEHOLDER VIEW)
 # =========================================================
