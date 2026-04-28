@@ -229,3 +229,52 @@ chart = (
 )
 
 st.altair_chart(chart, use_container_width=True)
+
+# =========================================================
+# 📌 MODEL INTERCEPTS & FORMULA (STAKEHOLDER VIEW)
+# =========================================================
+st.markdown(f"""
+### Growth Formula Used (Method C)
+
+**Quarter‑on‑quarter Purchase Sales growth formula**
+
+$$
+\\Delta PS
+=
+G_{{baseline}}
++
+(\\alpha + {BASELINE_SHIFT_PPT:.1f})
++
+\\beta_{{CIF}}\\,\\Delta CIF
++
+\\beta_{{SPC}}\\,\\Delta(Sales/CIF)
+$$
+
+---
+
+### Estimated Model Parameters (from the data)
+
+| Component | Value |
+|---------|-------|
+| Intercept (α, raw) | `{alpha_raw:.4f}` |
+| Macro baseline uplift | `+{BASELINE_SHIFT_PPT:.1f} ppt` |
+| **Effective intercept** | **`{alpha:.4f}`** |
+| β (Cards in Force) | `{beta_cif:.4f}` |
+| β (Sales / CIF) | `{beta_spc:.4f}` |
+
+---
+
+### Interpretation (plain English)
+
+• **Same‑Quarter Baseline**  
+Average historical growth for the same calendar quarter
+
+• **Intercept (α + 6 ppt)**  
+Represents current economy‑wide growth conditions, applied to all banks
+
+• **Drivers (β terms)**  
+Explain growth from card base expansion and spend intensity
+
+• **One‑time BDO/BPI adjustment**  
+A single +5.5% level uplift in **2026 Q1 only**, not ongoing growth
+""")
