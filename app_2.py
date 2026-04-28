@@ -231,46 +231,22 @@ chart = (
 # =========================================================
 # 📌 MODEL INTERCEPTS & FORMULA (STAKEHOLDER VIEW)
 # =========================================================
-st.markdown(r"""
+st.markdown(f"""
 ### Growth Formula Used (Method C)
 
 **Quarter‑on‑quarter Purchase Sales growth formula**
 
 $$
-\Delta PS
+\\Delta PS
 =
-G_{baseline}
+G_{{baseline}}
 +
-(\alpha + 6.0)
+(\\alpha + {BASELINE_SHIFT_PPT:.1f})
 +
-\beta_{CIF}\,\Delta CIF
+\\beta_{{CIF}}\\,\\Delta CIF
 +
-\beta_{SPC}\,\Delta(Sales/CIF)
+\\beta_{{SPC}}\\,\\Delta(Sales/CIF)
 $$
-
----
-
-### How to read this
-
-• **Same‑Quarter Baseline**  
-Average historical growth for the *same calendar quarter* (e.g., Q1 vs Q1)
-
-• **Intercept (α + 6 ppt)**  
-Represents the current economy‑wide growth conditions, applied to all banks
-
-• **Cards in Force driver (β_CIF)**  
-Explains growth from expansion in active cards
-
-• **Sales per CIF driver (β_SPC)**  
-Explains growth from higher spend per card
-
----
-
-### One‑Time Structural Adjustment (BDO & BPI only)
-
-• In **2026 Q1**, BDO and BPI receive a **one‑time +5.5% level adjustment**  
-• This reflects a **temporary spend spike**  
-• After the adjustment, **all banks follow the same growth formula**
 
 ---
 
@@ -284,10 +260,19 @@ Explains growth from higher spend per card
 | β (Cards in Force) | `{beta_cif:.4f}` |
 | β (Sales / CIF) | `{beta_spc:.4f}` |
 
-**Key takeaway:**  
-The model cleanly separates **seasonality**, **regime shifts**, **structural drivers**,  
-and **one‑off bank effects** — without compounding distortions.
+---
+
+### Interpretation (plain English)
+
+• **Same‑Quarter Baseline**  
+Average historical growth for the same calendar quarter
+
+• **Intercept (α + 6 ppt)**  
+Represents current economy‑wide growth conditions, applied to all banks
+
+• **Drivers (β terms)**  
+Explain growth from card base expansion and spend intensity
+
+• **One‑time BDO/BPI adjustment**  
+A single +5.5% level uplift in **2026 Q1 only**, not ongoing growth
 """)
-
-st.altair_chart(chart, use_container_width=True)
-
