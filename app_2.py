@@ -244,7 +244,7 @@ st.markdown(f"""
 st.markdown(r"""
 ### Growth Model (Quarter‑on‑Quarter)
 
-\[
+$$
 \Delta PS
 =
 G_{baseline}
@@ -254,7 +254,7 @@ G_{baseline}
 \beta_{CIF}\,\Delta CIF
 +
 \beta_{SPC}\,\Delta(Sales/CIF)
-\]
+$$
 """)
 ---
 
