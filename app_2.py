@@ -243,7 +243,6 @@ st.markdown(f"""
 
 \[
 \Delta PS =
-\text{Same‑Quarter Seasonal Baseline}
 +
 (\alpha + 6.0\text{ ppt})
 +
