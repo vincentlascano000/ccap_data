@@ -234,22 +234,22 @@ st.altair_chart(chart, use_container_width=True)
 # 📌 MODEL INTERCEPTS & FORMULA (STAKEHOLDER VIEW)
 # =========================================================
 st.markdown("---")
-st.subheader("📌 Model Intercepts, Drivers, and Formula")
+st.subheader("Model Intercepts, Drivers, and Formula")
 
 st.markdown(f"""
 ### Growth Formula Used (Method C)
 
-**Quarter‑on‑quarter Purchase Sales growth is modeled as:**
+**Quarter‑on‑quarter Purchase Sales growth formula:**
 
 \[
-\\Delta PS =
-\\underbrace{{\\text{{Same‑Quarter Baseline}}}}_{{\\text{{historical seasonality}}}}
+\Delta PS =
+\text{Same‑Quarter Seasonal Baseline}
 +
-\\underbrace{{(\\alpha + {BASELINE_SHIFT_PPT:.1f}\\text{{ ppt}})}}_{{\\text{{macro baseline shift}}}}
+(\alpha + 6.0\text{ ppt})
 +
-\\underbrace{{\\beta_{{CIF}} \\cdot \\Delta CIF}}_{{\\text{{cards in force effect}}}}
+\beta_{CIF} \cdot \Delta CIF
 +
-\\underbrace{\beta_{SPC} \cdot \Delta (Sales/CIF)}_{\text{spend per card effect}}}}
+\beta_{SPC} \cdot \Delta (Sales/CIF)
 \]
 
 
