@@ -2,7 +2,7 @@
 # CCAP — Method C ONLY
 # Option A:
 # +6 ppt structural baseline
-# Scenario lever applies ±6 ppt economy‑wide
+# Adjustable scenario lever ±10 ppt (economy‑wide)
 # ONE‑TIME +5.5% level spike for BDO/BPI at 2026Q1
 
 import numpy as np
@@ -18,7 +18,7 @@ st.set_page_config(page_title="CCAP — Method C", layout="wide")
 RAW_URL = "https://raw.githubusercontent.com/vincentlascano000/ccap_data/main/CCAP_DATA.csv"
 TARGET_END = pd.Period("2028Q4", freq="Q")
 
-BASELINE_SHIFT_PPT = 6.0          # permanent structural uplift
+BASELINE_SHIFT_PPT = 0          # permanent structural uplift
 ONE_TIME_LIFT = 1.055             # +5.5% level jump
 LARGE_BANKS = {"BDO", "BPI"}
 
@@ -48,22 +48,20 @@ def fmt_q(p):
     return f"{p.quarter}Q{str(p.year)[-2:]}"
 
 # =========================================================
-# UI
+# UI — SCENARIO LEVER (±10 PPT)
 # =========================================================
 st.title("CCAP — Method C (Option A)")
 
-scenario = st.sidebar.selectbox(
-    "Scenario",
-    ["Pessimistic", "Realistic", "Optimistic"],
-    index=1  # Realistic default
+scenario_ppt = st.sidebar.slider(
+    "Scenario adjustment (ppt)",
+    min_value=-10.0,
+    max_value=10.0,
+    value=0.0,
+    step=0.5,
+    help="Economy‑wide growth adjustment applied to all banks"
 )
 
-SCENARIO_PPT = {
-    "Pessimistic": -6.0,
-    "Realistic": 0.0,
-    "Optimistic": 6.0,
-}
-scenario_shift = SCENARIO_PPT[scenario] / 100
+scenario_shift = scenario_ppt / 100
 
 # =========================================================
 # LOAD DATA
@@ -93,7 +91,7 @@ banks_pick = st.multiselect("Banks", banks, default=banks)
 panel = panel[panel["bank"].isin(banks_pick)]
 
 # =========================================================
-# FIT COEFFICIENTS (NO ROLLING WINDOW)
+# FIT COEFFICIENTS (METHOD C)
 # =========================================================
 def fit_uplift(df):
     g = df.copy()
@@ -103,11 +101,11 @@ def fit_uplift(df):
     g["d_cif"] = g.groupby("bank")["cif"].pct_change()
     g["d_spc"] = g.groupby("bank")["spc"].pct_change()
 
-    # Same‑quarter seasonal baseline (full history)
+    # Full-history same-quarter seasonal baseline
     bases = []
     for _, gb in g.groupby("bank"):
-        pools = gb.groupby("q")["d_ps"].mean()
-        bases.append(gb["q"].map(pools))
+        seasonal_mean = gb.groupby("q")["d_ps"].mean()
+        bases.append(gb["q"].map(seasonal_mean))
 
     g["g_base"] = pd.concat(bases).sort_index()
     g["r_ps"] = g["d_ps"] - g["g_base"]
@@ -125,7 +123,7 @@ def fit_uplift(df):
 
 alpha_raw, beta_cif, beta_spc = fit_uplift(panel)
 
-# ✅ Effective intercept:
+# ✅ Effective intercept used in projections
 alpha = (
     alpha_raw
     + BASELINE_SHIFT_PPT / 100
@@ -147,7 +145,6 @@ def project_method_c(gb):
     lifted = False
     rows = []
 
-    # Fixed seasonal baseline by quarter
     seasonal = gb.assign(
         q=gb["quarter_dt"].dt.quarter,
         d_ps=gb["ps"].pct_change(),
@@ -168,7 +165,7 @@ def project_method_c(gb):
 
         ps *= (1 + g_ps)
 
-        # ✅ ONE‑TIME BDO/BPI spike
+        # ✅ ONE‑TIME BDO/BPI SPIKE
         if (
             not lifted
             and bank in LARGE_BANKS
@@ -186,7 +183,7 @@ def project_method_c(gb):
             "quarter_label": fmt_q(t),
             "bank": bank,
             "ps": ps,
-            "scenario": scenario,
+            "scenario": f"{scenario_ppt:+.1f} ppt",
         })
 
     return pd.DataFrame(rows)
