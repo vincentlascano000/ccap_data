@@ -241,17 +241,21 @@ st.markdown(f"""
 
 **Quarter‑on‑quarter Purchase Sales growth formula:**
 
+st.markdown(r"""
+### Growth Model (Quarter‑on‑Quarter)
+
 \[
-\Delta PS =
+\Delta PS
+=
+G_{baseline}
 +
-(\alpha + 6.0\text{ ppt})
+(\alpha + 6.0)
 +
-\beta_{CIF} \cdot \Delta CIF
+\beta_{CIF}\,\Delta CIF
 +
-\beta_{SPC} \cdot \Delta (Sales/CIF)
+\beta_{SPC}\,\Delta(Sales/CIF)
 \]
-
-
+""")
 ---
 
 ### How to read this
