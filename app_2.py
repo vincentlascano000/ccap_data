@@ -11,8 +11,8 @@ st.set_page_config(page_title="CCAP — Method C", layout="wide")
 RAW_URL = "https://raw.githubusercontent.com/vincentlascano000/ccap_data/main/CCAP_DATA.csv"
 TARGET_END = pd.Period("2028Q4", freq="Q")
 
-BASELINE_SHIFT_PPT = 0            # permanent structural uplift
-ONE_TIME_LIFT = 1.050             # +5.0% one-time level jump
+BASELINE_SHIFT_PPT = 0          # permanent structural uplift
+ONE_TIME_LIFT = 1.050             # +5.5% level jump
 LARGE_BANKS = {"BDO", "BPI"}
 
 BANK_COLORS = {
@@ -31,7 +31,11 @@ def parse_quarter_dt(q):
     s = str(q).strip().upper()
     quarter = int(s[0])
     year = 2000 + int(s[2:])
-    return pd.Period(year=year, quarter=quarter, freq="Q").to_timestamp(how="end")
+    return pd.Period(
+        year=year,
+        quarter=quarter,
+        freq="Q"
+    ).to_timestamp(how="end")
 
 def fmt_q(p):
     return f"{p.quarter}Q{str(p.year)[-2:]}"
@@ -39,7 +43,7 @@ def fmt_q(p):
 # =========================================================
 # UI — SCENARIO LEVER (±10 PPT)
 # =========================================================
-st.title("CCAP — Method C (2024→2025 basis)")
+st.title("CCAP — Method C (Option A)")
 
 scenario_ppt = st.sidebar.slider(
     "Scenario adjustment (ppt)",
@@ -47,8 +51,9 @@ scenario_ppt = st.sidebar.slider(
     max_value=10.0,
     value=0.0,
     step=0.05,
-    help="Economy-wide growth adjustment applied to all banks"
+    help="Economy‑wide growth adjustment applied to all banks"
 )
+
 scenario_shift = scenario_ppt / 100
 
 # =========================================================
@@ -79,7 +84,7 @@ banks_pick = st.multiselect("Banks", banks, default=banks)
 panel = panel[panel["bank"].isin(banks_pick)]
 
 # =========================================================
-# FIT COEFFICIENTS (2024 → 2025 ONLY)
+# FIT COEFFICIENTS (METHOD C)
 # =========================================================
 def fit_uplift(df):
     g = df.copy()
@@ -88,10 +93,6 @@ def fit_uplift(df):
     g["d_ps"] = g.groupby("bank")["ps"].pct_change()
     g["d_cif"] = g.groupby("bank")["cif"].pct_change()
     g["d_spc"] = g.groupby("bank")["spc"].pct_change()
-
-    # ✅ KEY CHANGE:
-    # Keep only 2024→2025 growth (ending quarter in 2025)
-    g = g[g["quarter_dt"].dt.year == 2025]
 
     bases = []
     for _, gb in g.groupby("bank"):
@@ -114,7 +115,12 @@ def fit_uplift(df):
 
 alpha_raw, beta_cif, beta_spc = fit_uplift(panel)
 
-alpha = alpha_raw + BASELINE_SHIFT_PPT / 100 + scenario_shift
+# intercept
+alpha = (
+    alpha_raw
+    + BASELINE_SHIFT_PPT / 100
+    + scenario_shift
+)
 
 # =========================================================
 # METHOD C PROJECTION — OPTION A
@@ -131,15 +137,12 @@ def project_method_c(gb):
     lifted = False
     rows = []
 
-    # ✅ Seasonal profile ALSO based on 2024→2025 only
-    seasonal_src = gb[gb["quarter_dt"].dt.year == 2025].assign(
-        q=gb.loc[gb["quarter_dt"].dt.year == 2025, "quarter_dt"].dt.quarter,
+    seasonal = gb.assign(
+        q=gb["quarter_dt"].dt.quarter,
         d_ps=gb["ps"].pct_change(),
         d_cif=gb["cif"].pct_change(),
         d_spc=gb["spc"].pct_change(),
-    )
-
-    seasonal = seasonal_src.groupby("q")[["d_ps", "d_cif", "d_spc"]].mean()
+    ).groupby("q")[["d_ps", "d_cif", "d_spc"]].mean()
 
     for h in range(1, H + 1):
         t = last + h
@@ -154,7 +157,7 @@ def project_method_c(gb):
 
         ps *= (1 + g_ps)
 
-        # ✅ ONE-TIME BDO/BPI SPIKE
+        # ✅ ONE‑TIME BDO/BPI SPIKE
         if (
             not lifted
             and bank in LARGE_BANKS
@@ -223,7 +226,9 @@ st.altair_chart(chart, use_container_width=True)
 # MODEL INTERCEPTS & FORMULA (STAKEHOLDER VIEW)
 # =========================================================
 st.markdown(f"""
-### Growth Formula Used (Method C — 2024→2025 basis)
+### Growth Formula Used (Method C)
+
+**Quarter‑on‑quarter Purchase Sales growth formula**
 
 $$
 \\Delta PS
@@ -239,19 +244,29 @@ $$
 
 ---
 
-### Estimated Model Parameters (2024→2025 only)
+### Estimated Model Parameters (from the data)
 
 | Component | Value |
 |---------|-------|
 | Intercept (α, raw) | `{alpha_raw:.4f}` |
-| Scenario uplift | `+{scenario_ppt:.1f} ppt` |
+| Macro baseline uplift | `+{scenario_ppt:.1f} ppt` |
 | **Effective intercept** | **`{alpha:.4f}`** |
 | β (Cards in Force) | `{beta_cif:.4f}` |
 | β (Sales / CIF) | `{beta_spc:.4f}` |
 
 ---
 
-### Note
-This version estimates coefficients and seasonality **only from 2024→2025 changes**,  
-excluding 2023→2024 to reflect the most recent regime.
+### Interpretation (plain English)
+
+• **Same‑Quarter Baseline**  
+Average historical growth for the same calendar quarter
+
+• **Intercept (α + {scenario_ppt:.1f})**  
+Represents current economy‑wide growth conditions, applied to all banks
+
+• **Drivers (β terms)**  
+Explain growth from card base expansion and spend intensity
+
+• **One‑time BDO/BPI adjustment**  
+A single +5.0% level uplift in **2026 Q1 only**, not ongoing growth
 """)
