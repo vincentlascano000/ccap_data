@@ -244,7 +244,7 @@ $$
 
 ---
 
-### Estimated Model Parameters (from the data)
+### Estimated Model Parameters
 
 | Component | Value |
 |---------|-------|
@@ -256,7 +256,7 @@ $$
 
 ---
 
-### Interpretation (plain English)
+### Interpretation
 
 • **Same‑Quarter Baseline**  
 Average historical growth for the same calendar quarter
