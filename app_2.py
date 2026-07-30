@@ -19,7 +19,7 @@ RAW_URL = "https://raw.githubusercontent.com/vincentlascano000/ccap_data/main/CC
 TARGET_END = pd.Period("2028Q4", freq="Q")
 
 BASELINE_SHIFT_PPT = 0          # permanent structural uplift
-ONE_TIME_LIFT = 1.050             # +5.5% level jump
+ONE_TIME_LIFT = 1.000             # +5.0% level jump
 LARGE_BANKS = {"BDO", "BPI"}
 
 BANK_COLORS = {
