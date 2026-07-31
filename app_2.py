@@ -6,7 +6,7 @@ import altair as alt
 # =========================================================
 # CONFIG
 # =========================================================
-st.set_page_config(page_title="CCAP — Method C (Recent-Weighted)", layout="wide")
+st.set_page_config(page_title="CCAP — Method C (Recent + Per-Bank)", layout="wide")
 
 RAW_URL = "https://raw.githubusercontent.com/vincentlascano000/ccap_data/main/CCAP_DATA.csv"
 TARGET_END = pd.Period("2028Q4", freq="Q")
@@ -33,9 +33,9 @@ def fmt_q(p):
     return f"{p.quarter}Q{str(p.year)[-2:]}"
 
 # =========================================================
-# UI
+# UI — LEVERS
 # =========================================================
-st.title("CCAP — Method C (Recent‑Weighted Seasonality)")
+st.title("CCAP — Method C (Recent‑Weighted + Per‑Bank Adjustment)")
 
 decay = st.sidebar.slider(
     "Recency weighting",
@@ -74,12 +74,28 @@ banks_pick = st.multiselect("Banks", banks, default=banks)
 panel = panel[panel["bank"].isin(banks_pick)]
 
 # =========================================================
-# RECENT-WEIGHTED SEASONAL PROFILE  (★ Option 2 core)
+# PER‑BANK ADJUSTMENT LEVERS (±10 ppt each)
+# =========================================================
+st.sidebar.header("Per‑Bank Adjustment (ppt)")
+
+bank_adjustments = {}
+for b in banks_pick:
+    bank_adjustments[b] = st.sidebar.slider(
+        f"{b}",
+        min_value=-10.0,
+        max_value=10.0,
+        value=0.0,
+        step=0.05,
+        help=f"Growth adjustment applied only to {b}"
+    ) / 100  # ppt -> proportion
+
+# =========================================================
+# RECENT‑WEIGHTED SEASONAL PROFILE
 # =========================================================
 def weighted_seasonal(gb, decay):
     """
     Per quarter-of-year weighted average growth,
-    where recent years receive exponentially higher weight.
+    recent years weighted exponentially higher.
     decay=1 -> equal weights; decay=0 -> latest year only.
     """
     g = gb.assign(
@@ -94,7 +110,6 @@ def weighted_seasonal(gb, decay):
         return pd.DataFrame(columns=["d_ps", "d_cif", "d_spc"])
 
     max_yr = g["yr"].max()
-    # Exponential recency weight
     g["w"] = np.power(decay, (max_yr - g["yr"]))
 
     def wavg(sub, col):
@@ -109,10 +124,10 @@ def weighted_seasonal(gb, decay):
             "d_cif": wavg(sub, "d_cif"),
             "d_spc": wavg(sub, "d_spc"),
         }
-    return pd.DataFrame(rows).T  # index = quarter-of-year
+    return pd.DataFrame(rows).T
 
 # =========================================================
-# FIT COEFFICIENTS  (uses recent-weighted baseline)
+# FIT COEFFICIENTS (recent-weighted baseline)
 # =========================================================
 def fit_uplift(df, decay):
     g = df.copy()
@@ -121,7 +136,6 @@ def fit_uplift(df, decay):
     g["d_cif"] = g.groupby("bank")["cif"].pct_change()
     g["d_spc"] = g.groupby("bank")["spc"].pct_change()
 
-    # Recent-weighted seasonal baseline per bank
     g_base_list = []
     for _, gb in g.groupby("bank"):
         seas = weighted_seasonal(gb, decay)["d_ps"]
@@ -138,10 +152,9 @@ def fit_uplift(df, decay):
     return beta
 
 alpha_raw, beta_cif, beta_spc = fit_uplift(panel, decay)
-alpha = alpha_raw
 
 # =========================================================
-# METHOD C PROJECTION  (uses recent-weighted seasonality)
+# METHOD C PROJECTION (recency + per-bank adjustment)
 # =========================================================
 def project_method_c(gb, decay):
     last = gb["quarter_dt"].max().to_period("Q")
@@ -151,6 +164,10 @@ def project_method_c(gb, decay):
     cif = gb.iloc[-1]["cif"]
     spc = gb.iloc[-1]["spc"]
     bank = gb.iloc[0]["bank"]
+
+    # ✅ Bank-specific intercept
+    bank_adj = bank_adjustments.get(bank, 0.0)
+    alpha_bank = alpha_raw + bank_adj
 
     seasonal = weighted_seasonal(gb, decay)
 
@@ -163,7 +180,7 @@ def project_method_c(gb, decay):
         d_cif  = seasonal.loc[q, "d_cif"] if q in seasonal.index else 0
         d_spc  = seasonal.loc[q, "d_spc"] if q in seasonal.index else 0
 
-        g_ps = g_base + (alpha + beta_cif * d_cif + beta_spc * d_spc)
+        g_ps = g_base + (alpha_bank + beta_cif * d_cif + beta_spc * d_spc)
         g_ps = np.clip(g_ps, -0.3, 0.3)
 
         ps  *= (1 + g_ps)
@@ -225,15 +242,20 @@ st.altair_chart(chart, use_container_width=True)
 # =========================================================
 # STAKEHOLDER PANEL
 # =========================================================
+adj_rows = "\n".join(
+    f"| {b} | `{bank_adjustments[b]*100:+.2f} ppt` |"
+    for b in banks_pick
+)
+
 st.markdown(f"""
-### Growth Formula (Method C — Recent‑Weighted Seasonality)
+### Growth Formula (Method C — Recent‑Weighted + Per‑Bank)
 
 $$
-\\Delta PS
+\\Delta PS_{{bank}}
 =
 G_{{baseline}}^{{recent}}
 +
-\\alpha
+(\\alpha + \\text{{bank adj}})
 +
 \\beta_{{CIF}}\\,\\Delta CIF
 +
@@ -246,20 +268,28 @@ $$
 
 | Component | Value |
 |---------|-------|
-| Intercept (α) | `{alpha:.4f}` |
+| Intercept (α, raw) | `{alpha_raw:.4f}` |
 | β (Cards in Force) | `{beta_cif:.4f}` |
 | β (Sales / CIF) | `{beta_spc:.4f}` |
 | Recency weighting | `{decay:.2f}` |
 
 ---
 
-### What changed vs. the old model
+### Per‑Bank Adjustments (applied to intercept)
 
-• **Seasonal baseline now weights recent years more heavily**  
-&nbsp;&nbsp;→ Recency = `{decay:.2f}` (1.0 = equal, 0.0 = latest year only)
+| Bank | Adjustment |
+|------|-----------|
+{adj_rows}
 
-• **2023→2024 dynamics no longer dominate** future projections  
-&nbsp;&nbsp;→ The model tracks the *current* regime, not the historical average
+---
 
-• **No manual overrides** — the adjustment is data‑driven and generalizes forward
+### How the two levers interact
+
+• **Recency weighting (`{decay:.2f}`)** — shapes the *data-driven* seasonal baseline  
+&nbsp;&nbsp;→ Lower = trust recent years more; 1.0 = original equal-weight behavior
+
+• **Per‑bank adjustment** — a *manual* intercept shift for a specific bank  
+&nbsp;&nbsp;→ Independent per bank; does not affect other banks or the seasonal fit
+
+• The recency slider is **predictive**; the per‑bank levers are **judgmental overlays** on top.
 """)
