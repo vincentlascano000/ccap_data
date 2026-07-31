@@ -11,10 +11,6 @@ st.set_page_config(page_title="CCAP — Method C", layout="wide")
 RAW_URL = "https://raw.githubusercontent.com/vincentlascano000/ccap_data/main/CCAP_DATA.csv"
 TARGET_END = pd.Period("2028Q4", freq="Q")
 
-BASELINE_SHIFT_PPT = 0          # permanent structural uplift
-ONE_TIME_LIFT = 1.050             # +5.5% level jump
-LARGE_BANKS = {"BDO", "BPI"}
-
 BANK_COLORS = {
     "UB": "#f28e2b",
     "BDO": "#4169E1",
@@ -41,20 +37,9 @@ def fmt_q(p):
     return f"{p.quarter}Q{str(p.year)[-2:]}"
 
 # =========================================================
-# UI — SCENARIO LEVER (±10 PPT)
+# UI
 # =========================================================
-st.title("CCAP — Method C (Option A)")
-
-scenario_ppt = st.sidebar.slider(
-    "Scenario adjustment (ppt)",
-    min_value=-10.0,
-    max_value=10.0,
-    value=0.0,
-    step=0.05,
-    help="Economy‑wide growth adjustment applied to all banks"
-)
-
-scenario_shift = scenario_ppt / 100
+st.title("CCAP — Method C (Per‑Bank Adjustment)")
 
 # =========================================================
 # LOAD DATA
@@ -82,6 +67,22 @@ panel = (
 banks = panel["bank"].unique().tolist()
 banks_pick = st.multiselect("Banks", banks, default=banks)
 panel = panel[panel["bank"].isin(banks_pick)]
+
+# =========================================================
+# PER‑BANK ADJUSTMENT LEVERS (±10 PPT EACH)
+# =========================================================
+st.sidebar.header("Per‑Bank Adjustment (ppt)")
+
+bank_adjustments = {}
+for b in banks_pick:
+    bank_adjustments[b] = st.sidebar.slider(
+        f"{b}",
+        min_value=-10.0,
+        max_value=10.0,
+        value=0.0,
+        step=0.05,
+        help=f"Growth adjustment applied only to {b}"
+    ) / 100  # convert ppt to proportion
 
 # =========================================================
 # FIT COEFFICIENTS (METHOD C)
@@ -115,15 +116,8 @@ def fit_uplift(df):
 
 alpha_raw, beta_cif, beta_spc = fit_uplift(panel)
 
-# intercept
-alpha = (
-    alpha_raw
-    + BASELINE_SHIFT_PPT / 100
-    + scenario_shift
-)
-
 # =========================================================
-# METHOD C PROJECTION — OPTION A
+# METHOD C PROJECTION (PER‑BANK ADJUSTMENT)
 # =========================================================
 def project_method_c(gb):
     last = gb["quarter_dt"].max().to_period("Q")
@@ -134,7 +128,10 @@ def project_method_c(gb):
     spc = gb.iloc[-1]["spc"]
     bank = gb.iloc[0]["bank"]
 
-    lifted = False
+    # ✅ Bank-specific intercept adjustment
+    bank_adj = bank_adjustments.get(bank, 0.0)
+    alpha_bank = alpha_raw + bank_adj
+
     rows = []
 
     seasonal = gb.assign(
@@ -152,21 +149,10 @@ def project_method_c(gb):
         d_cif = seasonal.loc[q, "d_cif"] if q in seasonal.index else 0
         d_spc = seasonal.loc[q, "d_spc"] if q in seasonal.index else 0
 
-        g_ps = g_base + (alpha + beta_cif * d_cif + beta_spc * d_spc)
+        g_ps = g_base + (alpha_bank + beta_cif * d_cif + beta_spc * d_spc)
         g_ps = np.clip(g_ps, -0.3, 0.3)
 
         ps *= (1 + g_ps)
-
-        # ✅ ONE‑TIME BDO/BPI SPIKE
-        if (
-            not lifted
-            and bank in LARGE_BANKS
-            and t.year == 2026
-            and t.quarter == 1
-        ):
-            ps *= ONE_TIME_LIFT
-            lifted = True
-
         cif *= (1 + d_cif)
         spc *= (1 + d_spc)
 
@@ -175,7 +161,7 @@ def project_method_c(gb):
             "quarter_label": fmt_q(t),
             "bank": bank,
             "ps": ps,
-            "scenario": f"{scenario_ppt:+.1f} ppt",
+            "scenario": "Method C",
         })
 
     return pd.DataFrame(rows)
@@ -225,6 +211,11 @@ st.altair_chart(chart, use_container_width=True)
 # =========================================================
 # MODEL INTERCEPTS & FORMULA (STAKEHOLDER VIEW)
 # =========================================================
+adj_rows = "\n".join(
+    f"| {b} | `{bank_adjustments[b]*100:+.2f} ppt` |"
+    for b in banks_pick
+)
+
 st.markdown(f"""
 ### Growth Formula Used (Method C)
 
@@ -235,7 +226,7 @@ $$
 =
 G_{{baseline}}
 +
-(\\alpha + {scenario_ppt:.1f})
+(\\alpha + \\text{{bank adjustment}})
 +
 \\beta_{{CIF}}\\,\\Delta CIF
 +
@@ -244,29 +235,28 @@ $$
 
 ---
 
-### Estimated Model Parameters
+### Estimated Model Parameters (from the data)
 
 | Component | Value |
 |---------|-------|
 | Intercept (α, raw) | `{alpha_raw:.4f}` |
-| Macro baseline uplift | `+{scenario_ppt:.1f} ppt` |
-| **Effective intercept** | **`{alpha:.4f}`** |
 | β (Cards in Force) | `{beta_cif:.4f}` |
 | β (Sales / CIF) | `{beta_spc:.4f}` |
 
 ---
 
-### References
+### Per‑Bank Adjustments (applied to intercept)
 
-• **Same‑Quarter Baseline**  
-Average historical growth for the same calendar quarter
+| Bank | Adjustment |
+|------|-----------|
+{adj_rows}
 
-• **Intercept (α + {scenario_ppt:.1f})**  
-Represents current economy‑wide growth conditions, applied to all banks
+---
 
-• **Drivers (β terms)**  
-Explain growth from card base expansion and spend intensity
+### Interpretation (plain English)
 
-• **One‑time BDO/BPI adjustment**  
-A single +5.0% level uplift in **2026 Q1 only**, not ongoing growth
+• **Same‑Quarter Baseline** — average historical growth for that quarter  
+• **Intercept (α)** — baseline growth not explained by drivers  
+• **Bank Adjustment** — manual per‑bank growth tuning (independent)  
+• **Drivers (β terms)** — growth from card base and spend intensity
 """)
