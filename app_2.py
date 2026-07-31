@@ -6,7 +6,7 @@ import altair as alt
 # =========================================================
 # CONFIG
 # =========================================================
-st.set_page_config(page_title="CCAP — Method C (Recent + Per-Bank)", layout="wide")
+st.set_page_config(page_title="CCAP — Method C (Dampened)", layout="wide")
 
 RAW_URL = "https://raw.githubusercontent.com/vincentlascano000/ccap_data/main/CCAP_DATA.csv"
 TARGET_END = pd.Period("2028Q4", freq="Q")
@@ -35,15 +35,18 @@ def fmt_q(p):
 # =========================================================
 # UI — LEVERS
 # =========================================================
-st.title("CCAP — Method C (Recent‑Weighted + Per‑Bank Adjustment)")
+st.title("CCAP — Method C (Recent‑Weighted + Seasonal Dampening)")
 
 decay = st.sidebar.slider(
     "Recency weighting",
-    min_value=0.0,
-    max_value=1.0,
-    value=0.5,
-    step=0.05,
-    help="1.0 = all years equal, 0.5 = recent year ~2× prior, 0.0 = latest year only"
+    min_value=0.0, max_value=1.0, value=0.5, step=0.05,
+    help="1.0 = all years equal; lower = trust recent years more"
+)
+
+lam = st.sidebar.slider(
+    "Seasonality strength (λ)",
+    min_value=0.0, max_value=1.0, value=0.6, step=0.05,
+    help="1.0 = full seasonal peaks/troughs; lower = smoother, more realistic swings"
 )
 
 # =========================================================
@@ -81,22 +84,19 @@ st.sidebar.header("Per‑Bank Adjustment (ppt)")
 bank_adjustments = {}
 for b in banks_pick:
     bank_adjustments[b] = st.sidebar.slider(
-        f"{b}",
-        min_value=-10.0,
-        max_value=10.0,
-        value=0.0,
-        step=0.05,
+        f"{b}", min_value=-10.0, max_value=10.0,
+        value=0.0, step=0.05,
         help=f"Growth adjustment applied only to {b}"
-    ) / 100  # ppt -> proportion
+    ) / 100
 
 # =========================================================
-# RECENT‑WEIGHTED SEASONAL PROFILE
+# RECENT‑WEIGHTED + DAMPENED SEASONAL PROFILE
 # =========================================================
-def weighted_seasonal(gb, decay):
+def weighted_seasonal(gb, decay, lam):
     """
-    Per quarter-of-year weighted average growth,
-    recent years weighted exponentially higher.
-    decay=1 -> equal weights; decay=0 -> latest year only.
+    Recency-weighted seasonal growth per quarter-of-year,
+    then dampened toward the cross-quarter average by factor lam.
+    lam=1 -> full seasonality; lam=0 -> flat (no seasonality).
     """
     g = gb.assign(
         q=gb["quarter_dt"].dt.quarter,
@@ -119,17 +119,20 @@ def weighted_seasonal(gb, decay):
 
     rows = {}
     for q, sub in g.groupby("q"):
-        rows[q] = {
-            "d_ps":  wavg(sub, "d_ps"),
-            "d_cif": wavg(sub, "d_cif"),
-            "d_spc": wavg(sub, "d_spc"),
-        }
-    return pd.DataFrame(rows).T
+        rows[q] = {c: wavg(sub, c) for c in ["d_ps", "d_cif", "d_spc"]}
+    seas = pd.DataFrame(rows).T  # index = quarter-of-year
+
+    # ✅ SEASONAL DAMPENING: shrink swings toward the mean
+    for col in ["d_ps", "d_cif", "d_spc"]:
+        avg = seas[col].mean()
+        seas[col] = avg + lam * (seas[col] - avg)
+
+    return seas
 
 # =========================================================
-# FIT COEFFICIENTS (recent-weighted baseline)
+# FIT COEFFICIENTS (uses dampened baseline)
 # =========================================================
-def fit_uplift(df, decay):
+def fit_uplift(df, decay, lam):
     g = df.copy()
     g["q"] = g["quarter_dt"].dt.to_period("Q").dt.quarter
     g["d_ps"]  = g.groupby("bank")["ps"].pct_change()
@@ -138,7 +141,7 @@ def fit_uplift(df, decay):
 
     g_base_list = []
     for _, gb in g.groupby("bank"):
-        seas = weighted_seasonal(gb, decay)["d_ps"]
+        seas = weighted_seasonal(gb, decay, lam)["d_ps"]
         g_base_list.append(gb["q"].map(seas))
     g["g_base"] = pd.concat(g_base_list).sort_index()
 
@@ -151,12 +154,12 @@ def fit_uplift(df, decay):
     beta, *_ = np.linalg.lstsq(X, y, rcond=None)
     return beta
 
-alpha_raw, beta_cif, beta_spc = fit_uplift(panel, decay)
+alpha_raw, beta_cif, beta_spc = fit_uplift(panel, decay, lam)
 
 # =========================================================
-# METHOD C PROJECTION (recency + per-bank adjustment)
+# METHOD C PROJECTION
 # =========================================================
-def project_method_c(gb, decay):
+def project_method_c(gb, decay, lam):
     last = gb["quarter_dt"].max().to_period("Q")
     H = (TARGET_END.year - last.year) * 4 + (TARGET_END.quarter - last.quarter)
 
@@ -165,11 +168,8 @@ def project_method_c(gb, decay):
     spc = gb.iloc[-1]["spc"]
     bank = gb.iloc[0]["bank"]
 
-    # ✅ Bank-specific intercept
-    bank_adj = bank_adjustments.get(bank, 0.0)
-    alpha_bank = alpha_raw + bank_adj
-
-    seasonal = weighted_seasonal(gb, decay)
+    alpha_bank = alpha_raw + bank_adjustments.get(bank, 0.0)
+    seasonal = weighted_seasonal(gb, decay, lam)
 
     rows = []
     for h in range(1, H + 1):
@@ -199,7 +199,7 @@ def project_method_c(gb, decay):
 
 proj = pd.concat(
     [
-        project_method_c(panel[panel["bank"] == b], decay)
+        project_method_c(panel[panel["bank"] == b], decay, lam)
         for b in banks_pick
         if panel[panel["bank"] == b].shape[0] >= 3
     ],
@@ -248,12 +248,12 @@ adj_rows = "\n".join(
 )
 
 st.markdown(f"""
-### Growth Formula (Method C — Recent‑Weighted + Per‑Bank)
+### Growth Formula (Method C — Dampened Seasonality)
 
 $$
-\\Delta PS_{{bank}}
+\\Delta PS
 =
-G_{{baseline}}^{{recent}}
+\\big[\\bar{{g}} + \\lambda\\,(G_{{quarter}} - \\bar{{g}})\\big]
 +
 (\\alpha + \\text{{bank adj}})
 +
@@ -264,6 +264,13 @@ $$
 
 ---
 
+### Levers
+
+| Lever | Value | Meaning |
+|------|------|---------|
+| Recency weighting | `{decay:.2f}` | How much recent years drive seasonality |
+| **Seasonality strength (λ)** | `{lam:.2f}` | 1.0 = full peaks/troughs, 0.0 = flat |
+
 ### Estimated Parameters
 
 | Component | Value |
@@ -271,11 +278,8 @@ $$
 | Intercept (α, raw) | `{alpha_raw:.4f}` |
 | β (Cards in Force) | `{beta_cif:.4f}` |
 | β (Sales / CIF) | `{beta_spc:.4f}` |
-| Recency weighting | `{decay:.2f}` |
 
----
-
-### Per‑Bank Adjustments (applied to intercept)
+### Per‑Bank Adjustments
 
 | Bank | Adjustment |
 |------|-----------|
@@ -283,13 +287,13 @@ $$
 
 ---
 
-### How the two levers interact
+### How Seasonality Dampening Works
 
-• **Recency weighting (`{decay:.2f}`)** — shapes the *data-driven* seasonal baseline  
-&nbsp;&nbsp;→ Lower = trust recent years more; 1.0 = original equal-weight behavior
+• **λ = 1.0** → keeps the full historical seasonal pattern (sharp peaks and troughs)  
+• **λ = 0.6** (current) → softens swings by 40%, toward a more realistic shape  
+• **λ = 0.0** → removes seasonality entirely (every quarter grows at the average)
 
-• **Per‑bank adjustment** — a *manual* intercept shift for a specific bank  
-&nbsp;&nbsp;→ Independent per bank; does not affect other banks or the seasonal fit
-
-• The recency slider is **predictive**; the per‑bank levers are **judgmental overlays** on top.
+The dampening **preserves the average growth trend** — it only compresses the
+size of the quarter‑to‑quarter swings, preventing unrealistically high peaks
+and low troughs across **all** future quarters and banks.
 """)
