@@ -6,7 +6,7 @@ import altair as alt
 # =========================================================
 # CONFIG
 # =========================================================
-st.set_page_config(page_title="CCAP — Method C", layout="wide")
+st.set_page_config(page_title="CCAP — Method C (Recent-Weighted)", layout="wide")
 
 RAW_URL = "https://raw.githubusercontent.com/vincentlascano000/ccap_data/main/CCAP_DATA.csv"
 TARGET_END = pd.Period("2028Q4", freq="Q")
@@ -27,11 +27,7 @@ def parse_quarter_dt(q):
     s = str(q).strip().upper()
     quarter = int(s[0])
     year = 2000 + int(s[2:])
-    return pd.Period(
-        year=year,
-        quarter=quarter,
-        freq="Q"
-    ).to_timestamp(how="end")
+    return pd.Period(year=year, quarter=quarter, freq="Q").to_timestamp(how="end")
 
 def fmt_q(p):
     return f"{p.quarter}Q{str(p.year)[-2:]}"
@@ -39,7 +35,16 @@ def fmt_q(p):
 # =========================================================
 # UI
 # =========================================================
-st.title("CCAP — Method C (Per‑Bank Adjustment)")
+st.title("CCAP — Method C (Recent‑Weighted Seasonality)")
+
+decay = st.sidebar.slider(
+    "Recency weighting",
+    min_value=0.0,
+    max_value=1.0,
+    value=0.5,
+    step=0.05,
+    help="1.0 = all years equal, 0.5 = recent year ~2× prior, 0.0 = latest year only"
+)
 
 # =========================================================
 # LOAD DATA
@@ -69,90 +74,99 @@ banks_pick = st.multiselect("Banks", banks, default=banks)
 panel = panel[panel["bank"].isin(banks_pick)]
 
 # =========================================================
-# PER‑BANK ADJUSTMENT LEVERS (±10 PPT EACH)
+# RECENT-WEIGHTED SEASONAL PROFILE  (★ Option 2 core)
 # =========================================================
-st.sidebar.header("Per‑Bank Adjustment (ppt)")
+def weighted_seasonal(gb, decay):
+    """
+    Per quarter-of-year weighted average growth,
+    where recent years receive exponentially higher weight.
+    decay=1 -> equal weights; decay=0 -> latest year only.
+    """
+    g = gb.assign(
+        q=gb["quarter_dt"].dt.quarter,
+        yr=gb["quarter_dt"].dt.year,
+        d_ps=gb["ps"].pct_change(),
+        d_cif=gb["cif"].pct_change(),
+        d_spc=gb["spc"].pct_change(),
+    ).dropna(subset=["d_ps", "d_cif", "d_spc"])
 
-bank_adjustments = {}
-for b in banks_pick:
-    bank_adjustments[b] = st.sidebar.slider(
-        f"{b}",
-        min_value=-10.0,
-        max_value=10.0,
-        value=0.0,
-        step=0.05,
-        help=f"Growth adjustment applied only to {b}"
-    ) / 100  # convert ppt to proportion
+    if g.empty:
+        return pd.DataFrame(columns=["d_ps", "d_cif", "d_spc"])
+
+    max_yr = g["yr"].max()
+    # Exponential recency weight
+    g["w"] = np.power(decay, (max_yr - g["yr"]))
+
+    def wavg(sub, col):
+        w = sub["w"].to_numpy()
+        x = sub[col].to_numpy()
+        return np.average(x, weights=w) if w.sum() > 0 else np.nan
+
+    rows = {}
+    for q, sub in g.groupby("q"):
+        rows[q] = {
+            "d_ps":  wavg(sub, "d_ps"),
+            "d_cif": wavg(sub, "d_cif"),
+            "d_spc": wavg(sub, "d_spc"),
+        }
+    return pd.DataFrame(rows).T  # index = quarter-of-year
 
 # =========================================================
-# FIT COEFFICIENTS (METHOD C)
+# FIT COEFFICIENTS  (uses recent-weighted baseline)
 # =========================================================
-def fit_uplift(df):
+def fit_uplift(df, decay):
     g = df.copy()
     g["q"] = g["quarter_dt"].dt.to_period("Q").dt.quarter
-
-    g["d_ps"] = g.groupby("bank")["ps"].pct_change()
+    g["d_ps"]  = g.groupby("bank")["ps"].pct_change()
     g["d_cif"] = g.groupby("bank")["cif"].pct_change()
     g["d_spc"] = g.groupby("bank")["spc"].pct_change()
 
-    bases = []
+    # Recent-weighted seasonal baseline per bank
+    g_base_list = []
     for _, gb in g.groupby("bank"):
-        seasonal_mean = gb.groupby("q")["d_ps"].mean()
-        bases.append(gb["q"].map(seasonal_mean))
+        seas = weighted_seasonal(gb, decay)["d_ps"]
+        g_base_list.append(gb["q"].map(seas))
+    g["g_base"] = pd.concat(g_base_list).sort_index()
 
-    g["g_base"] = pd.concat(bases).sort_index()
     g["r_ps"] = g["d_ps"] - g["g_base"]
 
     fit = g.dropna(subset=["r_ps", "d_cif", "d_spc"])
-    X = np.column_stack([
-        np.ones(len(fit)),
-        fit["d_cif"],
-        fit["d_spc"]
-    ])
+    X = np.column_stack([np.ones(len(fit)), fit["d_cif"], fit["d_spc"]])
     y = fit["r_ps"].values
 
     beta, *_ = np.linalg.lstsq(X, y, rcond=None)
     return beta
 
-alpha_raw, beta_cif, beta_spc = fit_uplift(panel)
+alpha_raw, beta_cif, beta_spc = fit_uplift(panel, decay)
+alpha = alpha_raw
 
 # =========================================================
-# METHOD C PROJECTION (PER‑BANK ADJUSTMENT)
+# METHOD C PROJECTION  (uses recent-weighted seasonality)
 # =========================================================
-def project_method_c(gb):
+def project_method_c(gb, decay):
     last = gb["quarter_dt"].max().to_period("Q")
     H = (TARGET_END.year - last.year) * 4 + (TARGET_END.quarter - last.quarter)
 
-    ps = gb.iloc[-1]["ps"]
+    ps  = gb.iloc[-1]["ps"]
     cif = gb.iloc[-1]["cif"]
     spc = gb.iloc[-1]["spc"]
     bank = gb.iloc[0]["bank"]
 
-    # ✅ Bank-specific intercept adjustment
-    bank_adj = bank_adjustments.get(bank, 0.0)
-    alpha_bank = alpha_raw + bank_adj
+    seasonal = weighted_seasonal(gb, decay)
 
     rows = []
-
-    seasonal = gb.assign(
-        q=gb["quarter_dt"].dt.quarter,
-        d_ps=gb["ps"].pct_change(),
-        d_cif=gb["cif"].pct_change(),
-        d_spc=gb["spc"].pct_change(),
-    ).groupby("q")[["d_ps", "d_cif", "d_spc"]].mean()
-
     for h in range(1, H + 1):
         t = last + h
         q = t.quarter
 
-        g_base = seasonal.loc[q, "d_ps"] if q in seasonal.index else 0
-        d_cif = seasonal.loc[q, "d_cif"] if q in seasonal.index else 0
-        d_spc = seasonal.loc[q, "d_spc"] if q in seasonal.index else 0
+        g_base = seasonal.loc[q, "d_ps"]  if q in seasonal.index else 0
+        d_cif  = seasonal.loc[q, "d_cif"] if q in seasonal.index else 0
+        d_spc  = seasonal.loc[q, "d_spc"] if q in seasonal.index else 0
 
-        g_ps = g_base + (alpha_bank + beta_cif * d_cif + beta_spc * d_spc)
+        g_ps = g_base + (alpha + beta_cif * d_cif + beta_spc * d_spc)
         g_ps = np.clip(g_ps, -0.3, 0.3)
 
-        ps *= (1 + g_ps)
+        ps  *= (1 + g_ps)
         cif *= (1 + d_cif)
         spc *= (1 + d_spc)
 
@@ -168,7 +182,7 @@ def project_method_c(gb):
 
 proj = pd.concat(
     [
-        project_method_c(panel[panel["bank"] == b])
+        project_method_c(panel[panel["bank"] == b], decay)
         for b in banks_pick
         if panel[panel["bank"] == b].shape[0] >= 3
     ],
@@ -209,24 +223,17 @@ chart = (
 st.altair_chart(chart, use_container_width=True)
 
 # =========================================================
-# MODEL INTERCEPTS & FORMULA (STAKEHOLDER VIEW)
+# STAKEHOLDER PANEL
 # =========================================================
-adj_rows = "\n".join(
-    f"| {b} | `{bank_adjustments[b]*100:+.2f} ppt` |"
-    for b in banks_pick
-)
-
 st.markdown(f"""
-### Growth Formula Used (Method C)
-
-**Quarter‑on‑quarter Purchase Sales growth formula**
+### Growth Formula (Method C — Recent‑Weighted Seasonality)
 
 $$
 \\Delta PS
 =
-G_{{baseline}}
+G_{{baseline}}^{{recent}}
 +
-(\\alpha + \\text{{bank adjustment}})
+\\alpha
 +
 \\beta_{{CIF}}\\,\\Delta CIF
 +
@@ -235,28 +242,24 @@ $$
 
 ---
 
-### Estimated Model Parameters (from the data)
+### Estimated Parameters
 
 | Component | Value |
 |---------|-------|
-| Intercept (α, raw) | `{alpha_raw:.4f}` |
+| Intercept (α) | `{alpha:.4f}` |
 | β (Cards in Force) | `{beta_cif:.4f}` |
 | β (Sales / CIF) | `{beta_spc:.4f}` |
+| Recency weighting | `{decay:.2f}` |
 
 ---
 
-### Per‑Bank Adjustments (applied to intercept)
+### What changed vs. the old model
 
-| Bank | Adjustment |
-|------|-----------|
-{adj_rows}
+• **Seasonal baseline now weights recent years more heavily**  
+&nbsp;&nbsp;→ Recency = `{decay:.2f}` (1.0 = equal, 0.0 = latest year only)
 
----
+• **2023→2024 dynamics no longer dominate** future projections  
+&nbsp;&nbsp;→ The model tracks the *current* regime, not the historical average
 
-### Interpretation (plain English)
-
-• **Same‑Quarter Baseline** — average historical growth for that quarter  
-• **Intercept (α)** — baseline growth not explained by drivers  
-• **Bank Adjustment** — manual per‑bank growth tuning (independent)  
-• **Drivers (β terms)** — growth from card base and spend intensity
+• **No manual overrides** — the adjustment is data‑driven and generalizes forward
 """)
